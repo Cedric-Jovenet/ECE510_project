@@ -15,6 +15,7 @@ remote_machine/log/
 .pio/
 esp32_worker_tag/.pio/
 esp32_iot_probe/.pio/
+esp32_uwb_nodes/.pio/
 
 # Local device configuration and secrets
 esp32_worker_tag/include/config_local.h

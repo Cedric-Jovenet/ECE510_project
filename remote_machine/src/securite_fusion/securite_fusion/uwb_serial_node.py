@@ -20,6 +20,11 @@ DISTANCES_RE = re.compile(
     r'A(?P<anchor>\d+)\s*:\s*(?P<value>[0-9]+(?:\.[0-9]+)?)\s*cm',
     re.IGNORECASE,
 )
+NODE_DISTANCE_RE = re.compile(
+    r'\[DIST\]\s*Node\s*(?P<anchor>\d+)\s*->\s*Node\s*(?P<worker>\d+)'
+    r'\s*:\s*(?P<value>[0-9]+(?:\.[0-9]+)?)\s*cm',
+    re.IGNORECASE,
+)
 KEY_VALUE_RE = re.compile(
     r'(?:anchor|a)(?P<anchor>\d+)\s*[=:]\s*'
     r'(?P<value>[0-9]+(?:\.[0-9]+)?)\s*(?P<unit>cm|m)?',
@@ -258,6 +263,16 @@ class UwbSerialNode(Node):
         parsed_json = self._parse_json(port, line)
         if parsed_json:
             return parsed_json
+
+        node_distance = NODE_DISTANCE_RE.search(line)
+        if node_distance:
+            return [self._sample(
+                port=port,
+                worker_id=f'worker{node_distance.group("worker")}',
+                anchor_id=int(node_distance.group('anchor')),
+                distance_m=float(node_distance.group('value')) / 100.0,
+                source_line=line,
+            )]
 
         matches = list(DISTANCES_RE.finditer(line))
         if not matches:

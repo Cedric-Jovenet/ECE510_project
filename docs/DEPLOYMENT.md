@@ -70,6 +70,32 @@ platformio run -d esp32_worker_tag
 platformio run -d esp32_worker_tag -t upload
 ```
 
+## ESP32 UWB Nodes
+
+The UWB firmware is kept in `esp32_uwb_nodes/` so it is versioned with the rest
+of the project. The current bring-up configuration is:
+
+- `node1`: machine-side initiator, ranges to `node2`.
+- `node2`: worker/tag responder.
+
+Build both binaries from Windows:
+
+```powershell
+platformio run -d esp32_uwb_nodes -e node1 -e node2
+```
+
+When flashing from the machine Raspberry Pi, identify the CP2104 adapters first:
+
+```bash
+ls -l /dev/serial/by-id/*CP2104*
+```
+
+Flash the machine-side ESP32 with the `node1` binary and the worker/tag ESP32
+with the `node2` binary. After reboot, each ESP32 prints JSON status lines such
+as `{"type":"uwb_status","node_id":1,"role":"initiator",...}` and successful
+range samples as `{"type":"uwb_distance",...}`. Those lines are intentionally
+parseable by `uwb_serial_node.py` and should also appear on `/uwb/raw_lines`.
+
 ## Verification
 
 From the Windows workstation:
