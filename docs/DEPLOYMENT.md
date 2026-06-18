@@ -86,6 +86,8 @@ Expected dashboard behavior:
 - Video and UWB maps appear only inside accident reports.
 - Accident videos use archived clips served by `recorded_clip.mjpg`; dynamic
   `/clip.mjpg` URLs are not treated as report evidence.
+- The dashboard video evidence view uses recorded frames through
+  `recorded_frame.jpg`, with local play/pause and frame scrubbing controls.
 - UWB maps show the recorded movement window around the accident, not a global
   live map.
 

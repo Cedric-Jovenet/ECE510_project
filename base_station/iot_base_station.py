@@ -150,6 +150,38 @@ HTML = """<!doctype html>
       border: 1px solid var(--line);
       border-radius: 6px;
     }
+    .clip-viewer {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #0b0f14;
+      overflow: hidden;
+    }
+    .clip-frame {
+      width: 100%;
+      max-height: 360px;
+      object-fit: contain;
+      display: block;
+      background: #0b0f14;
+    }
+    .clip-controls {
+      display: grid;
+      grid-template-columns: auto minmax(80px, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+      padding: 8px;
+      background: #ffffff;
+      border-top: 1px solid var(--line);
+    }
+    .clip-controls button {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #f8fafc;
+      color: var(--text);
+      cursor: pointer;
+      font-weight: 700;
+      padding: 6px 10px;
+    }
+    .clip-controls input[type="range"] { width: 100%; }
     canvas.uwb-map {
       width: 100%;
       aspect-ratio: 1 / 0.72;
@@ -227,6 +259,7 @@ const DEFAULT_UWB = {
   workers: []
 };
 let renderedReportsSignature = null;
+const clipTimers = new Map();
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, c => ({
@@ -316,6 +349,109 @@ function sourceText(status) {
   return Object.entries(sources).map(([name, source]) =>
     `${name}:${source.level || 'unknown'}`
   ).join('  ') || 'sources n/a';
+}
+function frameUrlFromTemplate(template, index) {
+  return String(template || '').replace('{index}', String(index));
+}
+function frameTemplateFromMedia(media) {
+  if (media.frame_url_template) return media.frame_url_template;
+  if (media.clip_url && media.clip_id && media.clip_url.includes('/recorded_clip.mjpg')) {
+    const base = media.clip_url.split('/recorded_clip.mjpg')[0];
+    return `${base}/recorded_frame.jpg?clip_id=${encodeURIComponent(media.clip_id)}&index={index}`;
+  }
+  return '';
+}
+function clipFrameCount(media) {
+  return Number(media.frame_count || media.archive_result?.frame_count || 0);
+}
+function clipFps(media) {
+  return Math.max(1, Math.min(12, Number(media.clip_fps || media.archive_result?.fps || 4)));
+}
+function buildClipViewer(media, key) {
+  const frameCount = clipFrameCount(media);
+  const template = frameTemplateFromMedia(media);
+  if (!(media.recorded === true && frameCount > 0 && template)) {
+    return '<div class="empty">No recorded video evidence for this report</div>';
+  }
+  const safeKey = escapeHtml(key);
+  const safeTemplate = escapeHtml(template);
+  const firstFrame = escapeHtml(frameUrlFromTemplate(template, 0));
+  return `
+    <div class="clip-viewer" data-clip-key="${safeKey}" data-frame-count="${frameCount}" data-fps="${clipFps(media)}" data-template="${safeTemplate}">
+      <img class="clip-frame" data-role="frame" src="${firstFrame}" alt="Recorded accident frame">
+      <div class="clip-controls">
+        <button type="button" data-action="toggle">Play</button>
+        <input type="range" data-role="slider" min="0" max="${Math.max(0, frameCount - 1)}" value="0" step="1" aria-label="Video frame">
+        <span class="small" data-role="counter">1 / ${frameCount}</span>
+      </div>
+    </div>`;
+}
+function stopClipTimer(key) {
+  const timer = clipTimers.get(key);
+  if (timer) {
+    clearInterval(timer);
+    clipTimers.delete(key);
+  }
+}
+function stopAllClipTimers() {
+  for (const key of Array.from(clipTimers.keys())) stopClipTimer(key);
+}
+function setClipFrame(player, index) {
+  const frameCount = Number(player.dataset.frameCount || 0);
+  const bounded = Math.max(0, Math.min(frameCount - 1, Number(index) || 0));
+  const template = player.dataset.template || '';
+  const image = player.querySelector('[data-role="frame"]');
+  const slider = player.querySelector('[data-role="slider"]');
+  const counter = player.querySelector('[data-role="counter"]');
+  if (image) image.src = frameUrlFromTemplate(template, bounded);
+  if (slider) slider.value = String(bounded);
+  if (counter) counter.textContent = `${bounded + 1} / ${frameCount}`;
+  player.dataset.currentFrame = String(bounded);
+}
+function startClip(player) {
+  const key = player.dataset.clipKey;
+  const frameCount = Number(player.dataset.frameCount || 0);
+  const fps = Number(player.dataset.fps || 4);
+  const button = player.querySelector('[data-action="toggle"]');
+  if (!key || frameCount <= 1) return;
+  stopClipTimer(key);
+  if (Number(player.dataset.currentFrame || 0) >= frameCount - 1) setClipFrame(player, 0);
+  if (button) button.textContent = 'Pause';
+  const timer = setInterval(() => {
+    const current = Number(player.dataset.currentFrame || 0);
+    if (current >= frameCount - 1) {
+      stopClipTimer(key);
+      if (button) button.textContent = 'Play';
+      return;
+    }
+    setClipFrame(player, current + 1);
+  }, 1000 / fps);
+  clipTimers.set(key, timer);
+}
+function initClipViewers(root) {
+  for (const player of root.querySelectorAll('.clip-viewer')) {
+    const key = player.dataset.clipKey;
+    setClipFrame(player, Number(player.dataset.currentFrame || 0));
+    const button = player.querySelector('[data-action="toggle"]');
+    const slider = player.querySelector('[data-role="slider"]');
+    if (button) {
+      button.addEventListener('click', () => {
+        if (clipTimers.has(key)) {
+          stopClipTimer(key);
+          button.textContent = 'Play';
+        } else {
+          startClip(player);
+        }
+      });
+    }
+    if (slider) {
+      slider.addEventListener('input', () => {
+        stopClipTimer(key);
+        if (button) button.textContent = 'Play';
+        setClipFrame(player, Number(slider.value));
+      });
+    }
+  }
 }
 function worldToCanvas(x, y, scale, cx, cy) {
   return [cx + x * scale, cy - y * scale];
@@ -467,16 +603,18 @@ function renderDevices(state) {
 function renderReports(state) {
   const root = document.getElementById('reports');
   const open = new Set([...root.querySelectorAll('details.report[open]')].map(el => el.dataset.key));
+  const openRaw = new Set([...root.querySelectorAll('details.raw-details[open]')].map(el => el.dataset.rawKey));
   const reports = (state.reports || []).slice().reverse();
   const signature = reports.map((report, index) => {
     const payload = payloadOf(report);
     const media = mediaOf(report);
     const evidence = evidenceOf(report);
     const history = Array.isArray(evidence.uwb_history) ? evidence.uwb_history.length : 0;
-    return `${reportKey(report, index)}:${media.recorded === true}:${history}`;
+    return `${reportKey(report, index)}:${media.recorded === true}:${clipFrameCount(media)}:${Boolean(frameTemplateFromMedia(media))}:${history}`;
   }).join('|');
   if (signature === renderedReportsSignature) return;
   renderedReportsSignature = signature;
+  stopAllClipTimers();
   if (!reports.length) {
     root.innerHTML = '<div class="empty">No accident reports yet</div>';
     return;
@@ -486,11 +624,7 @@ function renderReports(state) {
     const status = statusOfReport(report);
     const media = mediaOf(report);
     const key = reportKey(report, index);
-    const hasRecordedClip = Boolean(media.clip_url && media.recorded === true);
-    const clipUrl = hasRecordedClip ? media.clip_url : '';
-    const clip = hasRecordedClip
-      ? `<img class="clip" src="${escapeHtml(clipUrl)}" alt="Accident evidence video">`
-      : '<div class="empty">No recorded video evidence for this report</div>';
+    const clip = buildClipViewer(media, key);
     return `
       <details class="report" data-key="${escapeHtml(key)}" ${open.has(key) ? 'open' : ''}>
         <summary>
@@ -504,14 +638,13 @@ function renderReports(state) {
             <div class="evidence-panel">
               <h3>Evidence Video</h3>
               ${clip}
-              ${media.viewer_url ? `<div class="small"><a href="${escapeHtml(media.viewer_url)}" target="_blank" rel="noreferrer">Open machine viewer</a></div>` : ''}
             </div>
             <div class="evidence-panel">
               <h3>UWB Movement Around Accident</h3>
               <canvas class="uwb-map report-map" width="800" height="560" data-report-index="${index}"></canvas>
             </div>
           </div>
-          <details class="subdetails">
+          <details class="subdetails raw-details" data-raw-key="${escapeHtml(key)}" ${openRaw.has(key) ? 'open' : ''}>
             <summary>Raw Accident Data</summary>
             <pre>${escapeHtml(JSON.stringify(payload || report, null, 2))}</pre>
           </details>
@@ -522,6 +655,7 @@ function renderReports(state) {
     const report = reports[Number(canvas.dataset.reportIndex)];
     drawUwbMovement(canvas, evidenceHistory(report));
   }
+  initClipViewers(root);
 }
 function refreshMetrics(state) {
   const devices = Object.values(state.devices || {});
@@ -662,6 +796,7 @@ class ApiHandler(BaseHTTPRequestHandler):
 
 class ReusableThreadingHTTPServer(ThreadingHTTPServer):
     allow_reuse_address = True
+    allow_reuse_port = True
 
 
 class Rfm95Receiver(threading.Thread):

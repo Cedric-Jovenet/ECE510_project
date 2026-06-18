@@ -550,7 +550,6 @@ class IotSupervisorNode(Node):
         clip_id = report_id
         archive_result = self._archive_video_clip(clip_id, center, before, after, fps)
         media = {
-            'viewer_url': f'{self.viewer_base_url}/',
             'clip_id': clip_id,
             'recorded': bool(archive_result.get('ok')),
             'archive_result': archive_result,
@@ -564,6 +563,11 @@ class IotSupervisorNode(Node):
             media['clip_url'] = (
                 f'{self.viewer_base_url}/recorded_clip.mjpg?clip_id={encoded_id}'
             )
+            media['frame_url_template'] = (
+                f'{self.viewer_base_url}/recorded_frame.jpg?'
+                f'clip_id={encoded_id}&index={{index}}'
+            )
+            media['frame_count'] = int(archive_result.get('frame_count') or 0)
         else:
             media['archive_error'] = archive_result.get('error', 'archive failed')
         return media

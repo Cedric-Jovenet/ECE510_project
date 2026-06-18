@@ -391,6 +391,8 @@ class FusionWebViewerNode(Node):
                     self._send_archive_clip()
                 elif path == '/recorded_clip.mjpg':
                     self._send_recorded_clip()
+                elif path == '/recorded_frame.jpg':
+                    self._send_recorded_frame()
                 else:
                     self.send_error(404)
 
@@ -596,6 +598,30 @@ class FusionWebViewerNode(Node):
                     except (BrokenPipeError, ConnectionResetError):
                         break
                     time.sleep(delay)
+
+            def _send_recorded_frame(self):
+                parsed = urlsplit(self.path)
+                params = parse_qs(parsed.query)
+                clip_id = params.get('clip_id', [''])[0]
+                try:
+                    index = int(params.get('index', [0])[0])
+                except (TypeError, ValueError):
+                    index = 0
+                clip = node.get_recorded_clip(clip_id)
+                frames = clip.get('frames', []) if clip else []
+                if index < 0 or index >= len(frames):
+                    self.send_error(404, 'Recorded frame not found')
+                    return
+                jpeg = frames[index].get('jpeg')
+                if not jpeg:
+                    self.send_error(404, 'Recorded frame not found')
+                    return
+                self.send_response(200)
+                self.send_header('Content-Type', 'image/jpeg')
+                self.send_header('Content-Length', str(len(jpeg)))
+                self.send_header('Cache-Control', 'private, max-age=3600')
+                self.end_headers()
+                self.wfile.write(jpeg)
 
         return ThreadingHTTPServer((self.host, self.port), Handler)
 
