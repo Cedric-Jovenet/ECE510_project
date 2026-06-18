@@ -51,19 +51,19 @@ static void maybePrintStatusJson()
     printStatusJson("heartbeat");
 }
 
-static void printDistanceJson(uint8_t targetId, double distanceCm)
+static void printDistanceJson(uint8_t workerId, uint8_t anchorId, uint8_t peerId, double distanceCm)
 {
     Serial.printf(
         "{\"type\":\"uwb_distance\",\"worker_id\":\"worker%u\","
         "\"anchor_id\":%u,\"distance_m\":%.4f,"
         "\"from_node\":%u,\"to_node\":%u,\"target_id\":%u,"
         "\"uptime_ms\":%lu}\n",
-        static_cast<unsigned>(targetId),
-        static_cast<unsigned>(NODE_ID),
+        static_cast<unsigned>(workerId),
+        static_cast<unsigned>(anchorId),
         distanceCm / 100.0,
         static_cast<unsigned>(NODE_ID),
-        static_cast<unsigned>(targetId),
-        static_cast<unsigned>(targetId),
+        static_cast<unsigned>(peerId),
+        static_cast<unsigned>(peerId),
         static_cast<unsigned long>(millis())
     );
 }
@@ -272,11 +272,12 @@ static bool doInitiator(uint8_t targetId)
     const int tReplyB = static_cast<int>(DW3000.read(0x12, 0x08));
     const int rangingTime = DW3000.ds_processRTInfo(tRoundA, tReplyA, tRoundB, tReplyB, clockOffset);
     const double distanceCm = DW3000.convertToCM(rangingTime);
+    DW3000.clearSystemStatus();
 
     Serial.printf("[DIST] Node %u -> Node %u: ", NODE_ID, targetId);
     DW3000.printDouble(distanceCm, 100, false);
     Serial.println(" cm");
-    printDistanceJson(targetId, distanceCm);
+    printDistanceJson(NODE_ID, targetId, targetId, distanceCm);
 
     DW3000.clearSystemStatus();
     stopRadio();

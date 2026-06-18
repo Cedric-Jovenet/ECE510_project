@@ -90,15 +90,16 @@ platformio run -d esp32_worker_tag -t upload
 The UWB firmware is kept in `esp32_uwb_nodes/` so it is versioned with the rest
 of the project. The current bring-up configuration is:
 
-- `node1`: machine-side initiator. This is the only UWB ESP32 that must stay
-  connected to the machine Raspberry Pi over USB.
-- `node2`: worker/tag responder.
-- `node3`: second worker/tag responder.
+- `node1`: machine-side USB anchor/responder.
+- `node2`: machine-side USB anchor/responder.
+- `node3`: machine-side USB anchor/responder.
+- `node4`: worker/tag initiator. This is the only UWB ESP32 that should move
+  with the worker/tag.
 
-Build the three binaries from Windows:
+Build the four binaries from Windows:
 
 ```powershell
-platformio run -d esp32_uwb_nodes -e node1 -e node2 -e node3
+platformio run -d esp32_uwb_nodes -e node1 -e node2 -e node3 -e node4
 ```
 
 When flashing from the machine Raspberry Pi, identify the CP2104 adapters first:
@@ -107,14 +108,45 @@ When flashing from the machine Raspberry Pi, identify the CP2104 adapters first:
 ls -l /dev/serial/by-id/*CP2104*
 ```
 
-Flash the machine-side ESP32 with the `node1` binary. Flash worker/tag ESP32s
-with `node2` and `node3`; after flashing they only need power and do not need to
-remain connected to the machine USB port. After reboot, each ESP32 prints JSON
+Flash the three machine-side USB ESP32s with `node1`, `node2`, and `node3`.
+Flash the worker/tag ESP32 with `node4`. After reboot, each ESP32 prints JSON
 status lines such as
-`{"type":"uwb_status","node_id":1,"role":"initiator","num_nodes":3,...}` and
-successful range samples as `{"type":"uwb_distance",...}`. Those lines are
-intentionally parseable by `uwb_serial_node.py` and should also appear on
-`/uwb/raw_lines`.
+`{"type":"uwb_status","node_id":1,"role":"responder","num_nodes":4,...}`.
+The anchors also publish successful tag range samples as
+`{"type":"uwb_distance","worker_id":"worker4","anchor_id":1,...}` on their USB
+serial ports; those lines are intentionally parseable by `uwb_serial_node.py`
+and should also appear on `/uwb/raw_lines`.
+
+Current lab flash commands:
+
+```powershell
+# Build locally on Windows
+& C:\Users\cedri\.platformio\penv\Scripts\platformio.exe run -d esp32_uwb_nodes -e node1 -e node2 -e node3 -e node4
+
+# Worker/tag UWB connected to the Windows PC on COM7
+& C:\Users\cedri\.platformio\penv\Scripts\platformio.exe run -d esp32_uwb_nodes -e node4 -t upload --upload-port COM7
+```
+
+```bash
+# Machine Raspberry Pi: stop ROS before flashing USB anchors
+cd /home/ece510/ece510
+./start_securite_fusion.sh stop
+
+# Flash visible machine-side anchors
+cd /home/ece510/uwb_flash/node1
+~/esptool-venv/bin/esptool --chip esp32 --port /dev/serial/by-id/usb-Silicon_Labs_CP2104_USB_to_UART_Bridge_Controller_023B6F01-if00-port0 --baud 460800 --before default-reset --after hard-reset write-flash --flash-mode dio --flash-freq 40m --flash-size detect 0x1000 bootloader.bin 0x8000 partitions.bin 0xe000 boot_app0.bin 0x10000 firmware.bin
+
+cd /home/ece510/uwb_flash/node2
+~/esptool-venv/bin/esptool --chip esp32 --port /dev/serial/by-id/usb-Silicon_Labs_CP2104_USB_to_UART_Bridge_Controller_023BB3CC-if00-port0 --baud 460800 --before default-reset --after hard-reset write-flash --flash-mode dio --flash-freq 40m --flash-size detect 0x1000 bootloader.bin 0x8000 partitions.bin 0xe000 boot_app0.bin 0x10000 firmware.bin
+
+# Use the same command for node3 after identifying the third CP2104 path:
+ls -l /dev/serial/by-id/*CP2104*
+cd /home/ece510/uwb_flash/node3
+~/esptool-venv/bin/esptool --chip esp32 --port /dev/serial/by-id/<third-CP2104-id> --baud 460800 --before default-reset --after hard-reset write-flash --flash-mode dio --flash-freq 40m --flash-size detect 0x1000 bootloader.bin 0x8000 partitions.bin 0xe000 boot_app0.bin 0x10000 firmware.bin
+
+cd /home/ece510/ece510
+./start_securite_fusion.sh restart
+```
 
 ## Verification
 
