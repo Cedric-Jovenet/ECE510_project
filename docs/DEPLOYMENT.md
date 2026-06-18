@@ -22,6 +22,21 @@ colcon build --packages-select securite_fusion
 ./start_securite_fusion.sh restart
 ```
 
+GPIO permissions for the ultrasonic sensors and buzzer are prepared by a small
+systemd service. Install or refresh it after copying `prepare_machine_gpio.sh`
+and `ece510-gpio-prepare.service`:
+
+```bash
+cd /home/ece510/ece510
+chmod +x prepare_machine_gpio.sh
+sudo cp prepare_machine_gpio.sh /usr/local/sbin/ece510-prepare-gpio.sh
+sudo chown root:root /usr/local/sbin/ece510-prepare-gpio.sh
+sudo chmod 755 /usr/local/sbin/ece510-prepare-gpio.sh
+sudo cp ece510-gpio-prepare.service /etc/systemd/system/ece510-gpio-prepare.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now ece510-gpio-prepare.service
+```
+
 The supervisor publishes accident reports after the post-accident evidence
 window has elapsed. By default this window is 5 seconds before and 5 seconds
 after the accident.
@@ -75,13 +90,15 @@ platformio run -d esp32_worker_tag -t upload
 The UWB firmware is kept in `esp32_uwb_nodes/` so it is versioned with the rest
 of the project. The current bring-up configuration is:
 
-- `node1`: machine-side initiator, ranges to `node2`.
+- `node1`: machine-side initiator. This is the only UWB ESP32 that must stay
+  connected to the machine Raspberry Pi over USB.
 - `node2`: worker/tag responder.
+- `node3`: second worker/tag responder.
 
-Build both binaries from Windows:
+Build the three binaries from Windows:
 
 ```powershell
-platformio run -d esp32_uwb_nodes -e node1 -e node2
+platformio run -d esp32_uwb_nodes -e node1 -e node2 -e node3
 ```
 
 When flashing from the machine Raspberry Pi, identify the CP2104 adapters first:
@@ -90,11 +107,14 @@ When flashing from the machine Raspberry Pi, identify the CP2104 adapters first:
 ls -l /dev/serial/by-id/*CP2104*
 ```
 
-Flash the machine-side ESP32 with the `node1` binary and the worker/tag ESP32
-with the `node2` binary. After reboot, each ESP32 prints JSON status lines such
-as `{"type":"uwb_status","node_id":1,"role":"initiator",...}` and successful
-range samples as `{"type":"uwb_distance",...}`. Those lines are intentionally
-parseable by `uwb_serial_node.py` and should also appear on `/uwb/raw_lines`.
+Flash the machine-side ESP32 with the `node1` binary. Flash worker/tag ESP32s
+with `node2` and `node3`; after flashing they only need power and do not need to
+remain connected to the machine USB port. After reboot, each ESP32 prints JSON
+status lines such as
+`{"type":"uwb_status","node_id":1,"role":"initiator","num_nodes":3,...}` and
+successful range samples as `{"type":"uwb_distance",...}`. Those lines are
+intentionally parseable by `uwb_serial_node.py` and should also appear on
+`/uwb/raw_lines`.
 
 ## Verification
 

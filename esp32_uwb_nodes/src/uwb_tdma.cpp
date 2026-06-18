@@ -28,13 +28,14 @@ static void printStatusJson(const char *event)
 {
     Serial.printf(
         "{\"type\":\"uwb_status\",\"event\":\"%s\",\"node_id\":%u,"
-        "\"role\":\"%s\",\"initiator_id\":%u,\"target_id\":%u,"
+        "\"role\":\"%s\",\"initiator_id\":%u,\"target_id\":%u,\"num_nodes\":%u,"
         "\"single_pair\":%s,\"uptime_ms\":%lu}\n",
         event,
         static_cast<unsigned>(NODE_ID),
         nodeRole(),
         static_cast<unsigned>(INITIATOR_NODE_ID),
         static_cast<unsigned>(DEBUG_TARGET_NODE_ID),
+        static_cast<unsigned>(NUM_NODES),
         SINGLE_PAIR_DEBUG_MODE ? "true" : "false",
         static_cast<unsigned long>(millis())
     );

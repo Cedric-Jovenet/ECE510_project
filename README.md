@@ -13,8 +13,8 @@ station devices.
   fallback.
 - `esp32_iot_probe/`: ESP32 hardware probe firmware used for bring-up tests.
 - `esp32_uwb_nodes/`: ESP32 DW3000 UWB firmware. In the current lab setup,
-  `node1` is the machine-side initiator and `node2` is the worker/tag
-  responder.
+  `node1` is the machine-side initiator and `node2`/`node3` are worker/tag
+  responders.
 
 ## Runtime Endpoints
 

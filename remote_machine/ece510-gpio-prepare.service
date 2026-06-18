@@ -1,0 +1,15 @@
+[Unit]
+Description=Prepare ECE510 GPIO permissions
+After=local-fs.target
+
+[Service]
+Type=oneshot
+Environment=GPIO_BASE=571
+Environment=TARGET_USER=ece510
+Environment=TARGET_GROUP=ece510
+Environment=BUZZER_GPIO=19
+ExecStart=/usr/local/sbin/ece510-prepare-gpio.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
