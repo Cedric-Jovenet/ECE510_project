@@ -29,6 +29,7 @@ after the accident.
 Useful environment overrides:
 
 ```bash
+UWB_PORTS=cp2104
 IOT_EVIDENCE_BEFORE_SEC=5.0
 IOT_EVIDENCE_AFTER_SEC=5.0
 IOT_UWB_HISTORY_PERIOD_SEC=0.25

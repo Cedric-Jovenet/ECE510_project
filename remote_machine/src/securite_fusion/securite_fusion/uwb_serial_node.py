@@ -139,7 +139,21 @@ class UwbSerialNode(Node):
     def _resolve_ports(self):
         ports_value = self.get_parameter('ports').value
         exclude = set(self._split_ports(self.get_parameter('exclude_ports').value))
-        if str(ports_value).strip().lower() != 'auto':
+        mode = str(ports_value).strip().lower()
+        if mode in ('cp2104', 'auto_cp2104', 'uwb_auto'):
+            by_id = sorted(glob.glob('/dev/serial/by-id/*CP2104*'))
+            if by_id:
+                return [
+                    path
+                    for path in by_id
+                    if path not in exclude and os.path.realpath(path) not in exclude
+                ]
+            self.get_logger().warning(
+                'No CP2104 UWB serial devices found under /dev/serial/by-id'
+            )
+            return []
+
+        if mode != 'auto':
             return [
                 port
                 for port in self._split_ports(ports_value)
