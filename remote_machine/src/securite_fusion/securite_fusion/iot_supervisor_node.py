@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import deque
 
@@ -434,15 +435,19 @@ class IotSupervisorNode(Node):
         for item in due:
             accident_time = float(item.get('accident_time', now))
             status = item.get('status') or {}
+            signature = item.get('signature', '')
+            report_id = self._make_report_id(accident_time, signature)
+            media = self._build_recorded_media(accident_time, report_id)
             report = {
                 'type': 'accident_report',
+                'report_id': report_id,
                 'time': accident_time,
                 'generated_time': now,
                 'device_id': self.machine_id,
                 'device_type': 'machine',
                 'level': 'critical',
-                'signature': item.get('signature', ''),
-                'media': self._build_media(accident_time),
+                'signature': signature,
+                'media': media,
                 'evidence': self._build_evidence(accident_time, status),
                 'status': status,
             }
@@ -526,6 +531,64 @@ class IotSupervisorNode(Node):
             if source.get('level') == 'critical':
                 sources.append(name)
         return ','.join(sources)
+
+    def _make_report_id(self, accident_time, signature):
+        raw = f'{self.machine_id}-{int(float(accident_time) * 1000)}-{signature or "critical"}'
+        safe = ''.join(
+            char if char.isalnum() or char in '._-' else '-'
+            for char in raw
+        )
+        return safe[:120]
+
+    def _build_recorded_media(self, center_time, report_id):
+        if not self.viewer_base_url:
+            return {'recorded': False, 'archive_error': 'viewer disabled'}
+        center = float(center_time)
+        before = max(0.0, self.video_clip_before)
+        after = max(0.0, self.video_clip_after)
+        fps = max(1.0, self.video_clip_fps)
+        clip_id = report_id
+        archive_result = self._archive_video_clip(clip_id, center, before, after, fps)
+        media = {
+            'viewer_url': f'{self.viewer_base_url}/',
+            'clip_id': clip_id,
+            'recorded': bool(archive_result.get('ok')),
+            'archive_result': archive_result,
+            'clip_center_time': center,
+            'clip_before_sec': before,
+            'clip_after_sec': after,
+            'clip_fps': fps,
+        }
+        if archive_result.get('ok'):
+            encoded_id = urllib.parse.quote(clip_id, safe='')
+            media['clip_url'] = (
+                f'{self.viewer_base_url}/recorded_clip.mjpg?clip_id={encoded_id}'
+            )
+        else:
+            media['archive_error'] = archive_result.get('error', 'archive failed')
+        return media
+
+    def _archive_video_clip(self, clip_id, center, before, after, fps):
+        if not self.viewer_base_url:
+            return {'ok': False, 'error': 'viewer disabled'}
+        params = urllib.parse.urlencode({
+            'clip_id': clip_id,
+            'center': f'{center:.3f}',
+            'before': f'{before:.1f}',
+            'after': f'{after:.1f}',
+            'fps': f'{fps:.1f}',
+        })
+        url = f'{self.viewer_base_url}/archive_clip?{params}'
+        try:
+            with urllib.request.urlopen(url, timeout=8.0) as response:
+                data = response.read().decode('utf-8')
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            return {'ok': False, 'error': str(exc)}
+        try:
+            payload = json.loads(data)
+        except json.JSONDecodeError:
+            return {'ok': False, 'error': 'invalid archive response'}
+        return payload if isinstance(payload, dict) else {'ok': False, 'error': 'invalid archive response'}
 
     def _build_media(self, center_time):
         if not self.viewer_base_url:

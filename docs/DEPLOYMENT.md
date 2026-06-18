@@ -84,5 +84,10 @@ Expected dashboard behavior:
 - System status shows current device pings.
 - Accident reports are collapsible.
 - Video and UWB maps appear only inside accident reports.
+- Accident videos use archived clips served by `recorded_clip.mjpg`; dynamic
+  `/clip.mjpg` URLs are not treated as report evidence.
 - UWB maps show the recorded movement window around the accident, not a global
   live map.
+
+Machine video clips are archived under `/tmp/securite_fusion_clips` on the
+machine Raspberry Pi.

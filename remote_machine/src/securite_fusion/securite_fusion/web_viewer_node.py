@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import os
 import threading
 import time
 from collections import deque
@@ -15,10 +16,10 @@ from std_msgs.msg import String
 
 
 HTML_PAGE = """<!doctype html>
-<html lang="fr">
+<html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>securite_fusion viewer</title>
+  <title>Safety Fusion Viewer</title>
   <style>
     :root { color-scheme: dark; }
     body {
@@ -98,7 +99,7 @@ HTML_PAGE = """<!doctype html>
     <pre id="status">waiting...</pre>
   </section>
   <section>
-    <h2>Carte UWB</h2>
+    <h2>UWB Map</h2>
     <canvas id="map" width="720" height="720"></canvas>
     <div class="status-row">
       <div class="metric"><b>Workers</b><span id="worker-count">0</span></div>
@@ -204,7 +205,7 @@ function drawMap(data) {
   if (!workers.length) {
     ctx.fillStyle = '#9aa4af';
     ctx.font = '16px Arial';
-    ctx.fillText('Aucun worker recu pour le moment', 24, 34);
+    ctx.fillText('No UWB worker received yet', 24, 34);
     ctx.font = '13px Arial';
     ctx.fillText('Les anchors restent visibles; les cercles apparaitront des qu une distance arrive.', 24, 56);
   }
@@ -325,6 +326,7 @@ class FusionWebViewerNode(Node):
         self.declare_parameter('jpeg_quality', 85)
         self.declare_parameter('clip_buffer_sec', 30.0)
         self.declare_parameter('clip_fps', 4.0)
+        self.declare_parameter('clip_archive_dir', '/tmp/securite_fusion_clips')
 
         self.image_topic = self.get_parameter('image_topic').value
         self.status_topic = self.get_parameter('status_topic').value
@@ -334,11 +336,14 @@ class FusionWebViewerNode(Node):
         self.jpeg_quality = int(self.get_parameter('jpeg_quality').value)
         self.clip_buffer_sec = float(self.get_parameter('clip_buffer_sec').value)
         self.clip_fps = max(1.0, float(self.get_parameter('clip_fps').value))
+        self.clip_archive_dir = str(self.get_parameter('clip_archive_dir').value)
         self.placeholder_jpeg = self._make_placeholder_jpeg()
+        os.makedirs(self.clip_archive_dir, exist_ok=True)
 
         self.lock = threading.Lock()
         self.latest_jpeg = None
         self.frame_buffer = deque()
+        self.recorded_clips = {}
         self.last_buffer_time = 0.0
         self.latest_status = {'message': 'waiting for /fusion_status'}
         self.latest_uwb = {
@@ -382,6 +387,10 @@ class FusionWebViewerNode(Node):
                     self._send_stream()
                 elif path == '/clip.mjpg':
                     self._send_clip()
+                elif path == '/archive_clip':
+                    self._send_archive_clip()
+                elif path == '/recorded_clip.mjpg':
+                    self._send_recorded_clip()
                 else:
                     self.send_error(404)
 
@@ -522,6 +531,72 @@ class FusionWebViewerNode(Node):
                         break
                     time.sleep(delay)
 
+            def _send_archive_clip(self):
+                parsed = urlsplit(self.path)
+                params = parse_qs(parsed.query)
+                clip_id = params.get('clip_id', [''])[0]
+                now = time.time()
+                try:
+                    center = float(params.get('center', [now])[0])
+                except (TypeError, ValueError):
+                    center = now
+                try:
+                    before = float(params.get('before', [5.0])[0])
+                except (TypeError, ValueError):
+                    before = 5.0
+                try:
+                    after = float(params.get('after', [5.0])[0])
+                except (TypeError, ValueError):
+                    after = 5.0
+                try:
+                    fps = float(params.get('fps', [node.clip_fps])[0])
+                except (TypeError, ValueError):
+                    fps = node.clip_fps
+
+                result = node.archive_clip(clip_id, center, before, after, fps)
+                data = json.dumps(result, separators=(',', ':')).encode('utf-8')
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(data)))
+                self.send_header('Cache-Control', 'no-store')
+                self.end_headers()
+                self.wfile.write(data)
+
+            def _send_recorded_clip(self):
+                parsed = urlsplit(self.path)
+                params = parse_qs(parsed.query)
+                clip_id = params.get('clip_id', [''])[0]
+                clip = node.get_recorded_clip(clip_id)
+                if not clip:
+                    self.send_error(404, 'Recorded clip not found')
+                    return
+
+                self.send_response(200)
+                self.send_header(
+                    'Content-Type',
+                    'multipart/x-mixed-replace; boundary=frame',
+                )
+                self.send_header('Cache-Control', 'private, max-age=3600')
+                self.end_headers()
+
+                fps = max(1.0, min(12.0, float(clip.get('fps') or node.clip_fps)))
+                delay = 1.0 / fps
+                for frame in clip.get('frames', []):
+                    jpeg = frame.get('jpeg')
+                    if not jpeg:
+                        continue
+                    try:
+                        self.wfile.write(b'--frame\r\n')
+                        self.wfile.write(b'Content-Type: image/jpeg\r\n')
+                        self.wfile.write(
+                            f'Content-Length: {len(jpeg)}\r\n\r\n'.encode()
+                        )
+                        self.wfile.write(jpeg)
+                        self.wfile.write(b'\r\n')
+                    except (BrokenPipeError, ConnectionResetError):
+                        break
+                    time.sleep(delay)
+
         return ThreadingHTTPServer((self.host, self.port), Handler)
 
     def image_callback(self, msg):
@@ -580,12 +655,101 @@ class FusionWebViewerNode(Node):
                 if start_time <= timestamp <= end_time
             ]
 
+    def archive_clip(self, clip_id, center_time, before_sec, after_sec, fps):
+        safe_id = self._safe_clip_id(clip_id)
+        center = float(center_time)
+        before = max(0.0, float(before_sec))
+        after = max(0.0, float(after_sec))
+        end_time = center + after
+        while time.time() < end_time:
+            time.sleep(min(0.2, end_time - time.time()))
+
+        frames = self.get_clip_frames(center, before, after)
+        if not frames:
+            return {
+                'ok': False,
+                'clip_id': safe_id,
+                'error': 'no buffered frames for requested accident window',
+            }
+
+        clip_dir = os.path.join(self.clip_archive_dir, safe_id)
+        os.makedirs(clip_dir, exist_ok=True)
+        manifest_frames = []
+        memory_frames = []
+        for index, (timestamp, jpeg) in enumerate(frames):
+            filename = f'frame_{index:06d}.jpg'
+            path = os.path.join(clip_dir, filename)
+            with open(path, 'wb') as handle:
+                handle.write(jpeg)
+            manifest_frames.append({'time': timestamp, 'file': filename})
+            memory_frames.append({'time': timestamp, 'jpeg': jpeg})
+
+        manifest = {
+            'clip_id': safe_id,
+            'created_time': time.time(),
+            'center_time': center,
+            'before_sec': before,
+            'after_sec': after,
+            'fps': max(1.0, min(12.0, float(fps))),
+            'frames': manifest_frames,
+        }
+        with open(os.path.join(clip_dir, 'manifest.json'), 'w', encoding='utf-8') as handle:
+            json.dump(manifest, handle, separators=(',', ':'))
+        with self.lock:
+            self.recorded_clips[safe_id] = dict(manifest, frames=memory_frames)
+        return {
+            'ok': True,
+            'clip_id': safe_id,
+            'frame_count': len(memory_frames),
+            'center_time': center,
+            'before_sec': before,
+            'after_sec': after,
+        }
+
+    def get_recorded_clip(self, clip_id):
+        safe_id = self._safe_clip_id(clip_id)
+        with self.lock:
+            clip = self.recorded_clips.get(safe_id)
+        if clip:
+            return clip
+
+        clip_dir = os.path.join(self.clip_archive_dir, safe_id)
+        manifest_path = os.path.join(clip_dir, 'manifest.json')
+        if not os.path.isfile(manifest_path):
+            return None
+        try:
+            with open(manifest_path, 'r', encoding='utf-8') as handle:
+                manifest = json.load(handle)
+            frames = []
+            for frame in manifest.get('frames', []):
+                path = os.path.join(clip_dir, frame.get('file', ''))
+                with open(path, 'rb') as handle:
+                    frames.append({
+                        'time': frame.get('time'),
+                        'jpeg': handle.read(),
+                    })
+            clip = dict(manifest, frames=frames)
+        except (OSError, json.JSONDecodeError):
+            return None
+        with self.lock:
+            self.recorded_clips[safe_id] = clip
+        return clip
+
+    @staticmethod
+    def _safe_clip_id(clip_id):
+        text = str(clip_id or '').strip()
+        safe = ''.join(
+            char if char.isalnum() or char in '._-' else '_'
+            for char in text
+        )
+        return (safe[:96] or f'clip-{int(time.time() * 1000)}')
+
     def _make_placeholder_jpeg(self):
         image = np.zeros((360, 640, 3), dtype=np.uint8)
         image[:] = (12, 15, 18)
         cv2.putText(
             image,
-            'Camera non active',
+            'Camera inactive',
             (42, 150),
             cv2.FONT_HERSHEY_SIMPLEX,
             1.0,

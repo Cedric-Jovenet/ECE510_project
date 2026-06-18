@@ -226,6 +226,7 @@ const DEFAULT_UWB = {
   zones: {critical_radius_m: 1.5, warning_radius_m: 3.0},
   workers: []
 };
+let renderedReportsSignature = null;
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, c => ({
@@ -262,7 +263,8 @@ function statusOfReport(report) {
   return payload.status || payload;
 }
 function reportKey(report, index) {
-  return `${report.device_id || 'unknown'}-${report.time || index}-${index}`;
+  const payload = payloadOf(report);
+  return payload.report_id || `${report.device_id || payload.device_id || 'unknown'}-${report.time || payload.time || index}`;
 }
 function sourcesOf(device) {
   return device?.payload?.active_sources || {};
@@ -466,6 +468,15 @@ function renderReports(state) {
   const root = document.getElementById('reports');
   const open = new Set([...root.querySelectorAll('details.report[open]')].map(el => el.dataset.key));
   const reports = (state.reports || []).slice().reverse();
+  const signature = reports.map((report, index) => {
+    const payload = payloadOf(report);
+    const media = mediaOf(report);
+    const evidence = evidenceOf(report);
+    const history = Array.isArray(evidence.uwb_history) ? evidence.uwb_history.length : 0;
+    return `${reportKey(report, index)}:${media.recorded === true}:${history}`;
+  }).join('|');
+  if (signature === renderedReportsSignature) return;
+  renderedReportsSignature = signature;
   if (!reports.length) {
     root.innerHTML = '<div class="empty">No accident reports yet</div>';
     return;
@@ -475,10 +486,11 @@ function renderReports(state) {
     const status = statusOfReport(report);
     const media = mediaOf(report);
     const key = reportKey(report, index);
-    const clipUrl = media.clip_url ? `${media.clip_url}${media.clip_url.includes('?') ? '&' : '?'}view=${Date.now()}-${index}` : '';
-    const clip = media.clip_url
+    const hasRecordedClip = Boolean(media.clip_url && media.recorded === true);
+    const clipUrl = hasRecordedClip ? media.clip_url : '';
+    const clip = hasRecordedClip
       ? `<img class="clip" src="${escapeHtml(clipUrl)}" alt="Accident evidence video">`
-      : '<div class="empty">No video evidence for this report</div>';
+      : '<div class="empty">No recorded video evidence for this report</div>';
     return `
       <details class="report" data-key="${escapeHtml(key)}" ${open.has(key) ? 'open' : ''}>
         <summary>
@@ -571,6 +583,7 @@ class StateStore:
     def add_report(self, payload, transport):
         now = time.time()
         report = {
+            'report_id': payload.get('report_id'),
             'time': float(payload.get('time', now)),
             'device_id': payload.get('device_id') or payload.get('worker_id') or 'unknown',
             'device_type': payload.get('device_type') or payload.get('type') or 'unknown',
