@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# ROS 2 workspaces
+build/
+install/
+log/
+remote_machine/build/
+remote_machine/install/
+remote_machine/log/
+
+# PlatformIO
+.pio/
+esp32_worker_tag/.pio/
+esp32_iot_probe/.pio/
+
+# Local device configuration and secrets
+esp32_worker_tag/include/config_local.h
+*.local
+*.env
+
+# Logs and temporary artifacts
+*.log
+*.tmp
+*.bak
