@@ -109,13 +109,25 @@ class UwbSerialNode(Node):
         self.declare_parameter('ranges_topic', '/uwb/ranges')
         self.declare_parameter('raw_topic', '/uwb/raw_lines')
         self.declare_parameter('poll_period_sec', 0.02)
+        self.declare_parameter('port_scan_period_sec', 1.0)
+        self.declare_parameter('expected_port_count', 3)
 
         self.worker_id = self.get_parameter('worker_id').value
         self.baudrate = int(self.get_parameter('baudrate').value)
         self.max_distance_m = float(
             self.declare_parameter('max_distance_m', 60.0).value
         )
-        self.last_retry_time = 0.0
+        self.port_scan_period_sec = max(
+            0.2,
+            float(self.get_parameter('port_scan_period_sec').value),
+        )
+        self.expected_port_count = max(
+            0,
+            int(self.get_parameter('expected_port_count').value),
+        )
+        self.last_port_scan_time = 0.0
+        self.last_port_count_log_time = 0.0
+        self.last_discovered_port_count = None
         self.last_invalid_log_time = 0.0
         self.ranges_pub = self.create_publisher(
             String,
@@ -130,9 +142,11 @@ class UwbSerialNode(Node):
 
         self.readers: List[SerialLineReader] = []
         self.pending_ports: List[str] = []
-        for port in self._resolve_ports():
+        initial_ports = self._resolve_ports()
+        for port in initial_ports:
             if not self._open_port(port):
                 self.pending_ports.append(port)
+        self._log_port_count(initial_ports)
 
         period = float(self.get_parameter('poll_period_sec').value)
         self.timer = self.create_timer(max(0.005, period), self.tick)
@@ -153,9 +167,6 @@ class UwbSerialNode(Node):
                     for path in by_id
                     if path not in exclude and os.path.realpath(path) not in exclude
                 ]
-            self.get_logger().warning(
-                'No CP2104 UWB serial devices found under /dev/serial/by-id'
-            )
             return []
 
         if mode != 'auto':
@@ -185,14 +196,25 @@ class UwbSerialNode(Node):
             self.get_logger().warning(f'Could not open {port}: {exc}')
             return False
 
-    def _retry_pending_ports(self):
+    def _refresh_ports(self):
+        now = time.monotonic()
+        if now - self.last_port_scan_time < self.port_scan_period_sec:
+            return
+        self.last_port_scan_time = now
+
+        discovered_ports = self._resolve_ports()
+        self._log_port_count(discovered_ports)
+        known_paths = {
+            reader.path for reader in self.readers
+        } | set(self.pending_ports)
+        for port in discovered_ports:
+            if port not in known_paths:
+                self.get_logger().info(f'Discovered UWB serial port {port}')
+                self.pending_ports.append(port)
+                known_paths.add(port)
+
         if not self.pending_ports:
             return
-
-        now = time.time()
-        if now - self.last_retry_time < 1.0:
-            return
-        self.last_retry_time = now
 
         remaining = []
         open_paths = {reader.path for reader in self.readers}
@@ -204,8 +226,29 @@ class UwbSerialNode(Node):
             remaining.append(port)
         self.pending_ports = remaining
 
+    def _log_port_count(self, discovered_ports):
+        count = len(discovered_ports)
+        now = time.monotonic()
+        changed = count != self.last_discovered_port_count
+        should_repeat = now - self.last_port_count_log_time >= 10.0
+        self.last_discovered_port_count = count
+
+        if self.expected_port_count <= 0:
+            return
+        if count < self.expected_port_count and (changed or should_repeat):
+            self.get_logger().warning(
+                f'Expected {self.expected_port_count} UWB serial ports, '
+                f'found {count}: {discovered_ports}'
+            )
+            self.last_port_count_log_time = now
+        elif count >= self.expected_port_count and changed:
+            self.get_logger().info(
+                f'All expected UWB serial ports are visible: {discovered_ports}'
+            )
+            self.last_port_count_log_time = now
+
     def tick(self):
-        self._retry_pending_ports()
+        self._refresh_ports()
         if not self.readers:
             return
 

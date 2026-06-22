@@ -63,6 +63,7 @@ FUSION_SAFETY_THRESHOLD_M="${FUSION_SAFETY_THRESHOLD_M:-0.5}"
 UWB_SOURCE="${UWB_SOURCE:-serial}"
 UWB_PORTS="${UWB_PORTS:-cp2104}"
 UWB_EXCLUDE_PORTS="${UWB_EXCLUDE_PORTS:-}"
+UWB_EXPECTED_PORT_COUNT="${UWB_EXPECTED_PORT_COUNT:-3}"
 UWB_ANCHORS_JSON="${UWB_ANCHORS_JSON:-{\"1\":[-0.35,0.0],\"2\":[0.35,0.0],\"3\":[0.0,0.55]}}"
 UWB_CRITICAL_RADIUS_M="${UWB_CRITICAL_RADIUS_M:-1.5}"
 UWB_WARNING_RADIUS_M="${UWB_WARNING_RADIUS_M:-3.0}"
@@ -291,6 +292,7 @@ start_nodes() {
     fi
     nohup ros2 run securite_fusion uwb_serial_node --ros-args \
       "${uwb_serial_args[@]}" \
+      -p expected_port_count:="$UWB_EXPECTED_PORT_COUNT" \
       > "$LOG_DIR/uwb_serial_node.log" 2>&1 &
     nohup ros2 run securite_fusion uwb_position_node --ros-args \
       -p anchor_positions_json:="'$UWB_ANCHORS_JSON'" \
