@@ -15,7 +15,7 @@ as_double() {
 CAMERA_SOURCE="${CAMERA_SOURCE:-csi}"
 CAMERA_DEVICE="${CAMERA_DEVICE:-/dev/video8}"
 CSI_CAMERA_DEVICE="${CSI_CAMERA_DEVICE:-/dev/video0}"
-CSI_MEDIA_DEVICE="${CSI_MEDIA_DEVICE:-/dev/media0}"
+CSI_MEDIA_DEVICE="${CSI_MEDIA_DEVICE:-auto}"
 CSI_BAYER_PATTERN="${CSI_BAYER_PATTERN:-RG}"
 CSI_ANALOGUE_GAIN="${CSI_ANALOGUE_GAIN:-120}"
 CSI_DIGITAL_GAIN="${CSI_DIGITAL_GAIN:-1024}"
@@ -162,6 +162,18 @@ prepare_gpio_access() {
   done
 }
 
+detect_csi_media_device() {
+  local candidate
+  for candidate in /dev/media*; do
+    [[ -e "$candidate" ]] || continue
+    if media-ctl -d "$candidate" -p 2>/dev/null | grep -q '^model[[:space:]]*rp1-cfe'; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
 stop_nodes() {
   echo "[stop] Arret des anciens noeuds securite_fusion/RPLidar..."
   pkill -f '/securite_fusion/iot_supervisor_node' 2>/dev/null || true
@@ -214,6 +226,15 @@ start_nodes() {
 
   if [[ "$ENABLE_CAMERA" == "1" ]]; then
     if [[ "$CAMERA_SOURCE" == "csi" ]]; then
+      if [[ "$CSI_MEDIA_DEVICE" == "auto" ]]; then
+        detected_media_device="$(detect_csi_media_device || true)"
+        if [[ -n "$detected_media_device" ]]; then
+          CSI_MEDIA_DEVICE="$detected_media_device"
+        else
+          echo "[warn] CSI media device auto-detect failed, falling back to /dev/media0"
+          CSI_MEDIA_DEVICE="/dev/media0"
+        fi
+      fi
       echo "[start] Camera CSI sur $CSI_CAMERA_DEVICE via $CSI_MEDIA_DEVICE"
       nohup ros2 run securite_fusion camera_raw_node --ros-args \
         -p device:="$CSI_CAMERA_DEVICE" \

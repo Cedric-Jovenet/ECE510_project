@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import ctypes
+import glob
+import re
 import signal
 import subprocess
 import threading
@@ -23,7 +25,7 @@ class Pi5RawCameraNode(Node):
         super().__init__('camera_raw_node')
 
         self.declare_parameter('device', '/dev/video0')
-        self.declare_parameter('media_device', '/dev/media3')
+        self.declare_parameter('media_device', 'auto')
         self.declare_parameter('width', 640)
         self.declare_parameter('height', 480)
         self.declare_parameter('topic', '/image_raw')
@@ -104,13 +106,50 @@ class Pi5RawCameraNode(Node):
                 f'Command failed: {" ".join(command)}\n{detail}'
             )
 
+    def _read_media_topology(self, media_device):
+        result = subprocess.run(
+            ['media-ctl', '-d', media_device, '-p'],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()
+            raise RuntimeError(
+                f'Command failed: media-ctl -d {media_device} -p\n{detail}'
+            )
+        return result.stdout
+
+    def _detect_media_device(self):
+        for media_device in sorted(glob.glob('/dev/media*')):
+            try:
+                topology = self._read_media_topology(media_device)
+            except RuntimeError:
+                continue
+            if re.search(r'^model\s+rp1-cfe$', topology, re.MULTILINE):
+                return media_device
+        raise RuntimeError('Could not find rp1-cfe media device')
+
+    def _find_entity_id(self, topology, entity_name):
+        pattern = re.compile(r'^\s*-\s+entity\s+(\d+):\s+(.+?)\s+\(')
+        for line in topology.splitlines():
+            match = pattern.match(line)
+            if match and match.group(2) == entity_name:
+                return match.group(1)
+        raise RuntimeError(f'Could not find media entity {entity_name!r}')
+
     def _configure_camera(self):
+        if self.media_device == 'auto':
+            self.media_device = self._detect_media_device()
+        topology = self._read_media_topology(self.media_device)
+        csi_entity = self._find_entity_id(topology, 'csi2')
+        ch0_entity = self._find_entity_id(topology, 'rp1-cfe-csi2_ch0')
         self._run_command([
             'media-ctl',
             '-d',
             self.media_device,
             '--links',
-            '"csi2":4->"rp1-cfe-csi2_ch0":0[1]',
+            f'{csi_entity}:4->{ch0_entity}:0[1]',
         ])
         for device, pad in (
             ('/dev/v4l-subdev2', 0),
