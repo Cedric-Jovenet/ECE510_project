@@ -38,10 +38,12 @@ class SerialLineReader:
     def __init__(self, path, baudrate):
         self.path = path
         self.baudrate = baudrate
-        self.fd = os.open(path, os.O_RDONLY | os.O_NOCTTY | os.O_NONBLOCK)
+        self.fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
         self._configure()
         self._release_modem_control_lines()
         self.buffer = bytearray()
+        self.last_host_heartbeat = 0.0
+        self.send_host_heartbeat(force=True)
 
     def _configure(self):
         attrs = termios.tcgetattr(self.fd)
@@ -89,6 +91,14 @@ class SerialLineReader:
             if text:
                 lines.append(text)
         return lines
+
+    def send_host_heartbeat(self, force=False):
+        """Tell dual-transport nodes that a USB host is actively reading."""
+        now = time.monotonic()
+        if not force and now - self.last_host_heartbeat < 2.0:
+            return
+        os.write(self.fd, b'HOST_USB\n')
+        self.last_host_heartbeat = now
 
     def close(self):
         if self.fd is not None:
@@ -252,6 +262,12 @@ class UwbSerialNode(Node):
         if not self.readers:
             return
 
+        for reader in list(self.readers):
+            try:
+                reader.send_host_heartbeat()
+            except OSError as exc:
+                self._drop_reader(reader, f'USB heartbeat failed: {exc}')
+
         fds = [reader.fd for reader in self.readers if reader.fd is not None]
         if not fds:
             return
@@ -265,17 +281,21 @@ class UwbSerialNode(Node):
             try:
                 lines = reader.read_lines()
             except OSError as exc:
-                self.get_logger().warning(f'Read failed on {reader.path}: {exc}')
-                reader.close()
-                self.readers.remove(reader)
-                if reader.path not in self.pending_ports:
-                    self.pending_ports.append(reader.path)
+                self._drop_reader(reader, f'Read failed: {exc}')
                 continue
 
             for line in lines:
                 self._publish_raw(reader.path, line)
                 for sample in self._parse_line(reader.path, line):
                     self._publish_range(sample)
+
+    def _drop_reader(self, reader, reason):
+        self.get_logger().warning(f'{reason} on {reader.path}')
+        reader.close()
+        if reader in self.readers:
+            self.readers.remove(reader)
+        if reader.path not in self.pending_ports:
+            self.pending_ports.append(reader.path)
 
     def _publish_raw(self, port, line):
         msg = String()

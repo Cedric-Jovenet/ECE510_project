@@ -54,8 +54,8 @@ class UltrasonicNode(Node):
         self.declare_parameter('topic', '/ultrasonic/status')
         self.declare_parameter('gpio_base', 571)
         self.declare_parameter('sensors_json', json.dumps(DEFAULT_SENSORS))
-        self.declare_parameter('critical_distance_m', 0.30)
-        self.declare_parameter('warning_distance_m', 0.60)
+        self.declare_parameter('critical_distance_m', 1.0)
+        self.declare_parameter('warning_distance_m', 1.0)
         self.declare_parameter('period_sec', 0.35)
         self.declare_parameter('samples_per_sensor', 5)
         self.declare_parameter('min_valid_samples', 2)
@@ -229,4 +229,3 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
-

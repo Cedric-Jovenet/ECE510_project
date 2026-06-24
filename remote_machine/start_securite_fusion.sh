@@ -14,7 +14,7 @@ as_double() {
 
 CAMERA_SOURCE="${CAMERA_SOURCE:-csi}"
 CAMERA_DEVICE="${CAMERA_DEVICE:-/dev/video8}"
-CSI_CAMERA_DEVICE="${CSI_CAMERA_DEVICE:-/dev/video0}"
+CSI_CAMERA_DEVICE="${CSI_CAMERA_DEVICE:-auto}"
 CSI_MEDIA_DEVICE="${CSI_MEDIA_DEVICE:-auto}"
 CSI_BAYER_PATTERN="${CSI_BAYER_PATTERN:-RG}"
 CSI_ANALOGUE_GAIN="${CSI_ANALOGUE_GAIN:-120}"
@@ -36,6 +36,8 @@ BUZZER_CRITICAL_PERIOD_SEC="${BUZZER_CRITICAL_PERIOD_SEC:-0.32}"
 BUZZER_DURATION_SEC="${BUZZER_DURATION_SEC:-0.22}"
 IOT_BASE_STATION_URL="${IOT_BASE_STATION_URL:-http://10.152.83.65:8090}"
 IOT_VIEWER_BASE_URL="${IOT_VIEWER_BASE_URL:-http://10.152.83.176:8080}"
+IOT_LORA_GATEWAY_UDP_HOST="${IOT_LORA_GATEWAY_UDP_HOST:-10.152.83.255}"
+IOT_LORA_GATEWAY_UDP_PORT="${IOT_LORA_GATEWAY_UDP_PORT:-8895}"
 IOT_REPORT_COOLDOWN_SEC="${IOT_REPORT_COOLDOWN_SEC:-60.0}"
 IOT_VIDEO_CLIP_BEFORE_SEC="${IOT_VIDEO_CLIP_BEFORE_SEC:-5.0}"
 IOT_VIDEO_CLIP_AFTER_SEC="${IOT_VIDEO_CLIP_AFTER_SEC:-5.0}"
@@ -59,16 +61,17 @@ PERSON_DISTANCE_PERCENTILE="${PERSON_DISTANCE_PERCENTILE:-20.0}"
 
 YOLO_CONFIDENCE="${YOLO_CONFIDENCE:-0.25}"
 YOLO_MAX_FPS="${YOLO_MAX_FPS:-1.0}"
-FUSION_SAFETY_THRESHOLD_M="${FUSION_SAFETY_THRESHOLD_M:-0.5}"
+FUSION_SAFETY_THRESHOLD_M="${FUSION_SAFETY_THRESHOLD_M:-2.0}"
 UWB_SOURCE="${UWB_SOURCE:-serial}"
 UWB_PORTS="${UWB_PORTS:-cp2104}"
 UWB_EXCLUDE_PORTS="${UWB_EXCLUDE_PORTS:-}"
 UWB_EXPECTED_PORT_COUNT="${UWB_EXPECTED_PORT_COUNT:-3}"
+UWB_TAG_UDP_PORT="${UWB_TAG_UDP_PORT:-8890}"
 UWB_ANCHORS_JSON="${UWB_ANCHORS_JSON:-{\"1\":[-0.35,0.0],\"2\":[0.35,0.0],\"3\":[0.0,0.55]}}"
-UWB_CRITICAL_RADIUS_M="${UWB_CRITICAL_RADIUS_M:-1.5}"
-UWB_WARNING_RADIUS_M="${UWB_WARNING_RADIUS_M:-3.0}"
-ULTRASONIC_CRITICAL_DISTANCE_M="${ULTRASONIC_CRITICAL_DISTANCE_M:-0.3}"
-ULTRASONIC_WARNING_DISTANCE_M="${ULTRASONIC_WARNING_DISTANCE_M:-0.6}"
+UWB_CRITICAL_RADIUS_M="${UWB_CRITICAL_RADIUS_M:-2.0}"
+UWB_WARNING_RADIUS_M="${UWB_WARNING_RADIUS_M:-2.0}"
+ULTRASONIC_CRITICAL_DISTANCE_M="${ULTRASONIC_CRITICAL_DISTANCE_M:-1.0}"
+ULTRASONIC_WARNING_DISTANCE_M="${ULTRASONIC_WARNING_DISTANCE_M:-1.0}"
 ENABLE_RPLIDAR="${ENABLE_RPLIDAR:-1}"
 ENABLE_CAMERA="${ENABLE_CAMERA:-1}"
 ENABLE_YOLO="${ENABLE_YOLO:-1}"
@@ -193,6 +196,8 @@ stop_nodes() {
   pkill -f 'ros2 run securite_fusion camera_raw_node' 2>/dev/null || true
   pkill -f '/securite_fusion/uwb_serial_node' 2>/dev/null || true
   pkill -f 'ros2 run securite_fusion uwb_serial_node' 2>/dev/null || true
+  pkill -f '/securite_fusion/uwb_udp_node' 2>/dev/null || true
+  pkill -f 'ros2 run securite_fusion uwb_udp_node' 2>/dev/null || true
   pkill -f '/securite_fusion/uwb_position_node' 2>/dev/null || true
   pkill -f 'ros2 run securite_fusion uwb_position_node' 2>/dev/null || true
   pkill -f '/securite_fusion/uwb_simulator_node' 2>/dev/null || true
@@ -211,6 +216,7 @@ start_nodes() {
     "$LOG_DIR/fusion_node.log" \
     "$LOG_DIR/web_viewer_node.log" \
     "$LOG_DIR/uwb_serial_node.log" \
+    "$LOG_DIR/uwb_udp_node.log" \
     "$LOG_DIR/uwb_position_node.log" \
     "$LOG_DIR/uwb_simulator_node.log" \
     "$LOG_DIR/ultrasonic_node.log" \
@@ -230,10 +236,9 @@ start_nodes() {
       if [[ "$CSI_MEDIA_DEVICE" == "auto" ]]; then
         detected_media_device="$(detect_csi_media_device || true)"
         if [[ -n "$detected_media_device" ]]; then
-          CSI_MEDIA_DEVICE="$detected_media_device"
+          echo "[start] Controleur CSI actuellement detecte sur $detected_media_device"
         else
-          echo "[warn] CSI media device auto-detect failed, falling back to /dev/media0"
-          CSI_MEDIA_DEVICE="/dev/media0"
+          echo "[warn] Camera CSI absente au demarrage; attente automatique de son retour"
         fi
       fi
       echo "[start] Camera CSI sur $CSI_CAMERA_DEVICE via $CSI_MEDIA_DEVICE"
@@ -294,6 +299,9 @@ start_nodes() {
       "${uwb_serial_args[@]}" \
       -p expected_port_count:="$UWB_EXPECTED_PORT_COUNT" \
       > "$LOG_DIR/uwb_serial_node.log" 2>&1 &
+    nohup ros2 run securite_fusion uwb_udp_node --ros-args \
+      -p port:="$UWB_TAG_UDP_PORT" \
+      > "$LOG_DIR/uwb_udp_node.log" 2>&1 &
     nohup ros2 run securite_fusion uwb_position_node --ros-args \
       -p anchor_positions_json:="'$UWB_ANCHORS_JSON'" \
       -p critical_radius_m:="$UWB_CRITICAL_RADIUS_M" \
@@ -328,6 +336,8 @@ start_nodes() {
     nohup ros2 run securite_fusion iot_supervisor_node --ros-args \
       -p base_station_url:="$IOT_BASE_STATION_URL" \
       -p viewer_base_url:="$IOT_VIEWER_BASE_URL" \
+      -p lora_gateway_udp_host:="$IOT_LORA_GATEWAY_UDP_HOST" \
+      -p lora_gateway_udp_port:="$IOT_LORA_GATEWAY_UDP_PORT" \
       -p report_cooldown_sec:="$IOT_REPORT_COOLDOWN_SEC" \
       -p video_clip_before_sec:="$IOT_VIDEO_CLIP_BEFORE_SEC" \
       -p video_clip_after_sec:="$IOT_VIDEO_CLIP_AFTER_SEC" \

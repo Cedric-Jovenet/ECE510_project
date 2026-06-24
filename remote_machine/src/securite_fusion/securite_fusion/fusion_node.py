@@ -22,7 +22,7 @@ class FusionNode(Node):
         self.declare_parameter('image_topic', '/image_raw')
         self.declare_parameter('detections_topic', '/person_detections')
         self.declare_parameter('overlay_topic', '/fusion_overlay')
-        self.declare_parameter('safety_threshold_m', 0.5)
+        self.declare_parameter('safety_threshold_m', 2.0)
         self.declare_parameter('lidar_front_angle_deg', 0.0)
         self.declare_parameter('lidar_cone_half_angle_deg', 30.0)
         self.declare_parameter('camera_horizontal_fov_deg', 78.0)

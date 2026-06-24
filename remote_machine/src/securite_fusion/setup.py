@@ -30,6 +30,7 @@ setup(
             'person_detector_node = securite_fusion.person_detector_node:main',
             'web_viewer_node = securite_fusion.web_viewer_node:main',
             'uwb_serial_node = securite_fusion.uwb_serial_node:main',
+            'uwb_udp_node = securite_fusion.uwb_udp_node:main',
             'uwb_position_node = securite_fusion.uwb_position_node:main',
             'uwb_simulator_node = securite_fusion.uwb_simulator_node:main',
             'ultrasonic_node = securite_fusion.ultrasonic_node:main',

@@ -1,5 +1,7 @@
 #include "uwb_tdma.h"
+#include "uwb_telemetry.h"
 #include <SPI.h>
+#include "uwb_lora.h"
 
 static_assert(NODE_ID >= 1 && NODE_ID <= NUM_NODES, "NODE_ID must be within 1..NUM_NODES");
 static_assert(INITIATOR_NODE_ID >= 1 && INITIATOR_NODE_ID <= NUM_NODES, "INITIATOR_NODE_ID must be within 1..NUM_NODES");
@@ -278,6 +280,8 @@ static bool doInitiator(uint8_t targetId)
     DW3000.printDouble(distanceCm, 100, false);
     Serial.println(" cm");
     printDistanceJson(NODE_ID, targetId, targetId, distanceCm);
+    uwbTelemetryPublishDistance(targetId, distanceCm / 100.0);
+    uwbLoraRecordDistance(targetId, distanceCm / 100.0);
 
     DW3000.clearSystemStatus();
     stopRadio();

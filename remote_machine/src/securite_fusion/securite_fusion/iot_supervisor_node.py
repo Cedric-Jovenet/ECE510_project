@@ -3,6 +3,7 @@ import json
 import math
 import os
 import signal
+import socket
 import sys
 import threading
 import time
@@ -118,6 +119,8 @@ class IotSupervisorNode(Node):
         self.declare_parameter('alert_topic', '/iot/alert_state')
         self.declare_parameter('report_topic', '/iot/accident_reports')
         self.declare_parameter('base_station_url', 'http://10.152.83.65:8090')
+        self.declare_parameter('lora_gateway_udp_host', '10.152.83.255')
+        self.declare_parameter('lora_gateway_udp_port', 8895)
         self.declare_parameter('viewer_base_url', 'http://10.152.83.176:8080')
         self.declare_parameter('video_clip_before_sec', 5.0)
         self.declare_parameter('video_clip_after_sec', 5.0)
@@ -125,6 +128,7 @@ class IotSupervisorNode(Node):
         self.declare_parameter('evidence_before_sec', 5.0)
         self.declare_parameter('evidence_after_sec', 5.0)
         self.declare_parameter('uwb_history_period_sec', 0.25)
+        self.declare_parameter('max_evidence_uwb_samples', 20)
         self.declare_parameter('ping_period_sec', 5.0)
         self.declare_parameter('report_cooldown_sec', 60.0)
         self.declare_parameter('source_timeout_sec', 3.0)
@@ -146,6 +150,22 @@ class IotSupervisorNode(Node):
         self.base_station_url = str(
             self.get_parameter('base_station_url').value
         ).rstrip('/')
+        self.lora_gateway_udp_host = str(
+            self.get_parameter('lora_gateway_udp_host').value
+        )
+        self.lora_gateway_udp_port = int(
+            self.get_parameter('lora_gateway_udp_port').value
+        )
+        self.lora_gateway_socket = socket.socket(
+            socket.AF_INET,
+            socket.SOCK_DGRAM,
+        )
+        self.lora_gateway_socket.setsockopt(
+            socket.SOL_SOCKET,
+            socket.SO_BROADCAST,
+            1,
+        )
+        self.lora_relay_sequence = 0
         self.viewer_base_url = str(
             self.get_parameter('viewer_base_url').value
         ).rstrip('/')
@@ -164,6 +184,10 @@ class IotSupervisorNode(Node):
         )
         self.uwb_history_period = float(
             self.get_parameter('uwb_history_period_sec').value
+        )
+        self.max_evidence_uwb_samples = max(
+            1,
+            int(self.get_parameter('max_evidence_uwb_samples').value),
         )
         self.ping_period = float(self.get_parameter('ping_period_sec').value)
         self.report_cooldown = float(
@@ -398,7 +422,38 @@ class IotSupervisorNode(Node):
         if now - self.last_ping_time < self.ping_period:
             return
         self.last_ping_time = now
+        self._send_lora_relay(status)
         self._post_json('/api/ping', status)
+
+    def _send_lora_relay(self, status):
+        if not self.lora_gateway_udp_host or self.lora_gateway_udp_port <= 0:
+            return
+        self.lora_relay_sequence += 1
+        payload = {
+            'type': 'machine_ping',
+            'device_id': self.machine_id,
+            'device_type': 'machine',
+            'level': status.get('level', 'unknown'),
+            'seq': self.lora_relay_sequence,
+            'relay': 'worker4',
+        }
+        try:
+            self.lora_gateway_socket.sendto(
+                json.dumps(payload, separators=(',', ':')).encode('utf-8'),
+                (
+                    self.lora_gateway_udp_host,
+                    self.lora_gateway_udp_port,
+                ),
+            )
+        except OSError as exc:
+            self.get_logger().warning(
+                f'LoRa gateway UDP send failed: {exc}',
+                throttle_duration_sec=5.0,
+            )
+
+    def destroy_node(self):
+        self.lora_gateway_socket.close()
+        super().destroy_node()
 
     def _maybe_report(self, status):
         if status['level'] != 'critical':
@@ -435,6 +490,7 @@ class IotSupervisorNode(Node):
         for item in due:
             accident_time = float(item.get('accident_time', now))
             status = item.get('status') or {}
+            report_status = self._compact_status_for_report(status)
             signature = item.get('signature', '')
             report_id = self._make_report_id(accident_time, signature)
             media = self._build_recorded_media(accident_time, report_id)
@@ -449,7 +505,7 @@ class IotSupervisorNode(Node):
                 'signature': signature,
                 'media': media,
                 'evidence': self._build_evidence(accident_time, status),
-                'status': status,
+                'status': report_status,
             }
             self._publish(self.report_pub, report)
             self._post_json('/api/report', report)
@@ -486,6 +542,11 @@ class IotSupervisorNode(Node):
             snapshot = self._uwb_snapshot_from_status(status, center)
         if not history and snapshot is not None:
             history = [self._json_copy(snapshot)]
+        compact_history = [
+            self._compact_uwb_sample(sample)
+            for sample in history
+            if isinstance(sample, dict)
+        ]
         return {
             'window': {
                 'center_time': center,
@@ -494,9 +555,133 @@ class IotSupervisorNode(Node):
                 'before_sec': before,
                 'after_sec': after,
             },
-            'uwb_snapshot': snapshot or {},
-            'uwb_history': history,
+            'uwb_snapshot': (
+                self._compact_uwb_sample(snapshot)
+                if isinstance(snapshot, dict) else {}
+            ),
+            'uwb_history': self._limited_uwb_samples(compact_history),
         }
+
+    def _limited_uwb_samples(self, samples):
+        if len(samples) <= self.max_evidence_uwb_samples:
+            return samples
+        if self.max_evidence_uwb_samples <= 1:
+            return samples[-self.max_evidence_uwb_samples:]
+        last = len(samples) - 1
+        steps = self.max_evidence_uwb_samples - 1
+        indices = sorted({
+            int(round(index * last / steps))
+            for index in range(self.max_evidence_uwb_samples)
+        })
+        return [samples[index] for index in indices]
+
+    @staticmethod
+    def _compact_ranges(ranges):
+        compact = []
+        if not isinstance(ranges, list):
+            return compact
+        for item in ranges:
+            if not isinstance(item, dict):
+                continue
+            compact_item = {}
+            for key in ('anchor_id', 'distance_m'):
+                if key in item:
+                    compact_item[key] = item[key]
+            if compact_item:
+                compact.append(compact_item)
+        return compact
+
+    def _compact_worker(self, worker):
+        if not isinstance(worker, dict):
+            return {}
+        keep = (
+            'id',
+            'worker_id',
+            'x',
+            'y',
+            'display_x',
+            'display_y',
+            'display_position_valid',
+            'distance_to_machine_m',
+            'display_distance_to_machine_m',
+            'range_count',
+            'position_quality',
+            'warning_level',
+            'display_mode',
+        )
+        compact = {
+            key: worker[key]
+            for key in keep
+            if key in worker
+        }
+        for key in ('velocity', 'display_velocity'):
+            value = worker.get(key)
+            if isinstance(value, dict):
+                compact[key] = {
+                    subkey: value[subkey]
+                    for subkey in ('vx', 'vy', 'speed_mps')
+                    if subkey in value
+                }
+        ranges = self._compact_ranges(worker.get('ranges'))
+        if ranges:
+            compact['ranges'] = ranges
+        return compact
+
+    def _compact_uwb_sample(self, sample):
+        if not isinstance(sample, dict):
+            return {}
+        compact = {}
+        for key in ('time', 'frame', 'axis', 'zones'):
+            if key in sample:
+                compact[key] = sample[key]
+        anchors = sample.get('anchors')
+        if isinstance(anchors, list):
+            compact['anchors'] = [
+                {
+                    key: anchor[key]
+                    for key in ('id', 'x', 'y')
+                    if isinstance(anchor, dict) and key in anchor
+                }
+                for anchor in anchors
+                if isinstance(anchor, dict)
+            ]
+        workers = sample.get('workers')
+        if isinstance(workers, list):
+            compact['workers'] = [
+                self._compact_worker(worker)
+                for worker in workers
+                if isinstance(worker, dict)
+            ]
+        return compact
+
+    @staticmethod
+    def _compact_status_for_report(status):
+        if not isinstance(status, dict):
+            return status
+        compact = {
+            key: status[key]
+            for key in (
+                'type',
+                'time',
+                'device_id',
+                'device_type',
+                'level',
+                'message',
+            )
+            if key in status
+        }
+        active_sources = status.get('active_sources')
+        if isinstance(active_sources, dict):
+            compact['active_sources'] = {}
+            for name, source in active_sources.items():
+                if not isinstance(source, dict):
+                    continue
+                compact['active_sources'][name] = {
+                    key: source[key]
+                    for key in ('level', 'time', 'age_sec')
+                    if key in source
+                }
+        return compact
 
     def _closest_uwb_sample(self, center_time, max_delta=None):
         closest = None

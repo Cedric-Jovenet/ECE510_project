@@ -190,6 +190,35 @@ HTML = """<!doctype html>
       border-radius: 6px;
       background: #fbfcfe;
     }
+    .uwb-player {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      overflow: hidden;
+      background: #fbfcfe;
+    }
+    .uwb-player canvas.uwb-map {
+      border: 0;
+      border-radius: 0;
+    }
+    .uwb-controls {
+      display: grid;
+      grid-template-columns: auto minmax(80px, 1fr) auto auto;
+      gap: 8px;
+      align-items: center;
+      padding: 8px;
+      background: #ffffff;
+      border-top: 1px solid var(--line);
+    }
+    .uwb-controls button {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #f8fafc;
+      color: var(--text);
+      cursor: pointer;
+      font-weight: 700;
+      padding: 6px 10px;
+    }
+    .uwb-controls input[type="range"] { width: 100%; }
     .empty {
       color: var(--muted);
       padding: 18px 8px;
@@ -255,11 +284,13 @@ HTML = """<!doctype html>
 <script>
 const DEFAULT_UWB = {
   anchors: [{id: 1, x: -0.35, y: 0}, {id: 2, x: 0.35, y: 0}, {id: 3, x: 0, y: 0.55}],
-  zones: {critical_radius_m: 1.5, warning_radius_m: 3.0},
+  zones: {critical_radius_m: 2.0, warning_radius_m: 2.0},
   workers: []
 };
 let renderedReportsSignature = null;
 const clipTimers = new Map();
+const uwbTimers = new Map();
+let refreshInFlight = false;
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, c => ({
@@ -386,6 +417,24 @@ function buildClipViewer(media, key) {
       </div>
     </div>`;
 }
+function buildUwbAnimation(report, key, index) {
+  const frameCount = evidenceHistory(report).length;
+  if (frameCount <= 0) {
+    return '<div class="empty">No UWB movement recorded in this window</div>';
+  }
+  const safeKey = escapeHtml(key);
+  const maxFrame = Math.max(0, frameCount - 1);
+  return `
+    <div class="uwb-player" data-uwb-key="${safeKey}" data-report-index="${index}" data-frame-count="${frameCount}" data-fps="4">
+      <canvas class="uwb-map report-map" width="800" height="560"></canvas>
+      <div class="uwb-controls">
+        <button type="button" data-action="toggle">Play</button>
+        <input type="range" data-role="slider" min="0" max="${maxFrame}" value="0" step="1" aria-label="UWB frame">
+        <span class="small" data-role="counter">1 / ${frameCount}</span>
+        <span class="small" data-role="timestamp">time n/a</span>
+      </div>
+    </div>`;
+}
 function stopClipTimer(key) {
   const timer = clipTimers.get(key);
   if (timer) {
@@ -395,6 +444,16 @@ function stopClipTimer(key) {
 }
 function stopAllClipTimers() {
   for (const key of Array.from(clipTimers.keys())) stopClipTimer(key);
+}
+function stopUwbTimer(key) {
+  const timer = uwbTimers.get(key);
+  if (timer) {
+    clearInterval(timer);
+    uwbTimers.delete(key);
+  }
+}
+function stopAllUwbTimers() {
+  for (const key of Array.from(uwbTimers.keys())) stopUwbTimer(key);
 }
 function setClipFrame(player, index) {
   const frameCount = Number(player.dataset.frameCount || 0);
@@ -469,7 +528,26 @@ function workerColor(level) {
   if (level === 'warning') return '#a56500';
   return '#0a7f4f';
 }
-function drawUwbMovement(canvas, history) {
+function finiteNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+function workerDisplayPosition(worker) {
+  if (worker.display_position_valid === false) return null;
+  const displayX = finiteNumber(worker.display_x);
+  const displayY = finiteNumber(worker.display_y);
+  if (displayX !== null && displayY !== null) return [displayX, displayY];
+  const rawX = finiteNumber(worker.x);
+  const rawY = finiteNumber(worker.y);
+  if (rawX !== null && rawY !== null) return [rawX, rawY];
+  return null;
+}
+function workerDistance(worker) {
+  const displayDistance = finiteNumber(worker.display_distance_to_machine_m);
+  if (displayDistance !== null) return displayDistance;
+  return finiteNumber(worker.distance_to_machine_m);
+}
+function drawUwbFrame(canvas, history, frameIndex) {
   const ctx = canvas.getContext('2d');
   const width = canvas.width;
   const height = canvas.height;
@@ -481,7 +559,9 @@ function drawUwbMovement(canvas, history) {
   const reference = normalized.find(sample => sample.anchors?.length) || normalizeUwb(DEFAULT_UWB);
   const anchors = reference.anchors || DEFAULT_UWB.anchors;
   const zones = reference.zones || DEFAULT_UWB.zones;
-  const tracks = new Map();
+  const frameCount = normalized.length;
+  const boundedFrame = Math.max(0, Math.min(frameCount - 1, Number(frameIndex) || 0));
+  const current = frameCount ? normalized[boundedFrame] : normalizeUwb(DEFAULT_UWB);
   let maxExtent = Math.max(2.0, Number(zones.warning_radius_m) || 3.0);
 
   for (const anchor of anchors) {
@@ -489,18 +569,20 @@ function drawUwbMovement(canvas, history) {
   }
   for (const sample of normalized) {
     for (const worker of sample.workers || []) {
-      const x = Number(worker.x);
-      const y = Number(worker.y);
-      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-      const id = String(worker.id || worker.worker_id || 'worker');
-      if (!tracks.has(id)) tracks.set(id, []);
-      tracks.get(id).push({
-        x, y,
-        time: Number(sample.time) || 0,
-        level: worker.warning_level || 'clear',
-        distance: Number(worker.distance_to_machine_m)
-      });
+      const position = workerDisplayPosition(worker);
+      if (!position) continue;
+      const [x, y] = position;
       maxExtent = Math.max(maxExtent, Math.abs(x), Math.abs(y));
+      for (const range of worker.ranges || []) {
+        const anchor = anchors.find(item => String(item.id) === String(range.anchor_id));
+        const distance = Number(range.distance_m);
+        if (!anchor || !Number.isFinite(distance)) continue;
+        maxExtent = Math.max(
+          maxExtent,
+          Math.abs(Number(anchor.x) || 0) + distance,
+          Math.abs(Number(anchor.y) || 0) + distance
+        );
+      }
     }
   }
 
@@ -542,35 +624,118 @@ function drawUwbMovement(canvas, history) {
     ctx.fillText(`A${anchor.id}`, x + 12, y - 8);
   }
 
-  for (const [id, points] of tracks.entries()) {
-    if (!points.length) continue;
-    points.sort((a, b) => a.time - b.time);
-    const last = points[points.length - 1];
-    const color = workerColor(last.level);
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    points.forEach((point, index) => {
-      const [x, y] = worldToCanvas(point.x, point.y, scale, cx, cy);
-      if (index === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    });
-    ctx.stroke();
-    points.forEach((point, index) => {
-      const [x, y] = worldToCanvas(point.x, point.y, scale, cx, cy);
-      const alpha = 0.35 + 0.65 * ((index + 1) / points.length);
-      drawCircle(ctx, x, y, index === points.length - 1 ? 11 : 5, color, `rgba(23,32,42,${alpha})`, 1);
-    });
-    const [x, y] = worldToCanvas(last.x, last.y, scale, cx, cy);
+  let drawnWorkers = 0;
+  for (const worker of current.workers || []) {
+    const position = workerDisplayPosition(worker);
+    if (!position) continue;
+    drawnWorkers += 1;
+    const [workerX, workerY] = position;
+    const [x, y] = worldToCanvas(workerX, workerY, scale, cx, cy);
+    const level = worker.warning_level || 'clear';
+    const color = workerColor(level);
+    const partial = worker.position_quality && worker.position_quality !== 'trilaterated';
+
+    for (const range of worker.ranges || []) {
+      const anchor = anchors.find(item => String(item.id) === String(range.anchor_id));
+      const distance = Number(range.distance_m);
+      if (!anchor || !Number.isFinite(distance)) continue;
+      const [ax, ay] = worldToCanvas(Number(anchor.x) || 0, Number(anchor.y) || 0, scale, cx, cy);
+      ctx.setLineDash([7, 7]);
+      drawCircle(ctx, ax, ay, distance * scale, 'rgba(43,120,190,0.28)', null, partial ? 2 : 1);
+      ctx.setLineDash([]);
+      ctx.strokeStyle = 'rgba(102,112,133,0.24)';
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(x, y); ctx.stroke();
+    }
+
+    drawCircle(ctx, x, y, partial ? 10 : 12, color, partial ? 'rgba(255,255,255,0)' : color, 2);
+    const velocity = worker.display_velocity || worker.velocity || {};
+    const vx = Number(velocity.vx) || 0;
+    const vy = Number(velocity.vy) || 0;
+    const speed = Number(velocity.speed_mps) || 0;
+    if (speed > 0.03) {
+      const [ex, ey] = worldToCanvas(workerX + vx * 1.2, workerY + vy * 1.2, scale, cx, cy);
+      ctx.strokeStyle = '#182230';
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(ex, ey); ctx.stroke();
+    }
+
     ctx.fillStyle = '#182230';
-    const distance = Number.isFinite(last.distance) ? ` ${last.distance.toFixed(2)} m` : '';
-    ctx.fillText(`${id}${distance}`, x + 16, y - 10);
+    ctx.font = '14px Arial';
+    const id = String(worker.id || worker.worker_id || 'worker');
+    const distance = workerDistance(worker);
+    const distanceText = distance !== null ? ` ${distance.toFixed(2)} m` : '';
+    const modeText = worker.display_mode && worker.display_mode !== 'uwb' ? ` ${worker.display_mode}` : '';
+    ctx.fillText(`${id}${distanceText}${modeText}`, x + 16, y - 10);
   }
 
-  if (!tracks.size) {
+  if (!drawnWorkers) {
     ctx.fillStyle = '#697586';
     ctx.font = '16px Arial';
-    ctx.fillText('No UWB movement recorded in this window', 22, 32);
+    ctx.fillText('No UWB worker in this frame', 22, 32);
+  }
+
+  ctx.fillStyle = '#344054';
+  ctx.font = '13px Arial';
+  const timestamp = current.time ? new Date(Number(current.time) * 1000).toLocaleTimeString() : 'time n/a';
+  ctx.fillText(`UWB frame ${frameCount ? boundedFrame + 1 : 0} / ${frameCount} - ${timestamp}`, 22, height - 18);
+}
+function setUwbFrame(player, history, index) {
+  const frameCount = history.length;
+  const bounded = frameCount ? Math.max(0, Math.min(frameCount - 1, Number(index) || 0)) : 0;
+  const canvas = player.querySelector('canvas.report-map');
+  const slider = player.querySelector('[data-role="slider"]');
+  const counter = player.querySelector('[data-role="counter"]');
+  const timestamp = player.querySelector('[data-role="timestamp"]');
+  if (canvas) drawUwbFrame(canvas, history, bounded);
+  if (slider) slider.value = String(bounded);
+  if (counter) counter.textContent = `${frameCount ? bounded + 1 : 0} / ${frameCount}`;
+  const frameTime = history[bounded]?.time;
+  if (timestamp) timestamp.textContent = frameTime ? new Date(Number(frameTime) * 1000).toLocaleTimeString() : 'time n/a';
+  player.dataset.currentFrame = String(bounded);
+}
+function startUwbAnimation(player, history) {
+  const key = player.dataset.uwbKey;
+  const frameCount = history.length;
+  const fps = Math.max(1, Math.min(12, Number(player.dataset.fps || 4)));
+  const button = player.querySelector('[data-action="toggle"]');
+  if (!key || frameCount <= 1) return;
+  stopUwbTimer(key);
+  if (button) button.textContent = 'Pause';
+  const timer = setInterval(() => {
+    const current = Number(player.dataset.currentFrame || 0);
+    const next = current >= frameCount - 1 ? 0 : current + 1;
+    setUwbFrame(player, history, next);
+  }, 1000 / fps);
+  uwbTimers.set(key, timer);
+}
+function initUwbAnimations(root, reports) {
+  for (const player of root.querySelectorAll('.uwb-player')) {
+    const key = player.dataset.uwbKey;
+    const report = reports[Number(player.dataset.reportIndex)];
+    const history = evidenceHistory(report);
+    setUwbFrame(player, history, Number(player.dataset.currentFrame || 0));
+    const button = player.querySelector('[data-action="toggle"]');
+    const slider = player.querySelector('[data-role="slider"]');
+    if (button) {
+      button.disabled = history.length <= 1;
+      button.addEventListener('click', () => {
+        if (uwbTimers.has(key)) {
+          stopUwbTimer(key);
+          button.textContent = 'Play';
+        } else {
+          startUwbAnimation(player, history);
+        }
+      });
+    }
+    if (slider) {
+      slider.disabled = history.length <= 1;
+      slider.addEventListener('input', () => {
+        stopUwbTimer(key);
+        if (button) button.textContent = 'Play';
+        setUwbFrame(player, history, Number(slider.value));
+      });
+    }
   }
 }
 function renderDevices(state) {
@@ -615,6 +780,7 @@ function renderReports(state) {
   if (signature === renderedReportsSignature) return;
   renderedReportsSignature = signature;
   stopAllClipTimers();
+  stopAllUwbTimers();
   if (!reports.length) {
     root.innerHTML = '<div class="empty">No accident reports yet</div>';
     return;
@@ -625,6 +791,7 @@ function renderReports(state) {
     const media = mediaOf(report);
     const key = reportKey(report, index);
     const clip = buildClipViewer(media, key);
+    const uwbAnimation = buildUwbAnimation(report, key, index);
     return `
       <details class="report" data-key="${escapeHtml(key)}" ${open.has(key) ? 'open' : ''}>
         <summary>
@@ -641,7 +808,7 @@ function renderReports(state) {
             </div>
             <div class="evidence-panel">
               <h3>UWB Movement Around Accident</h3>
-              <canvas class="uwb-map report-map" width="800" height="560" data-report-index="${index}"></canvas>
+              ${uwbAnimation}
             </div>
           </div>
           <details class="subdetails raw-details" data-raw-key="${escapeHtml(key)}" ${openRaw.has(key) ? 'open' : ''}>
@@ -651,11 +818,8 @@ function renderReports(state) {
         </div>
       </details>`;
   }).join('');
-  for (const canvas of root.querySelectorAll('canvas.report-map')) {
-    const report = reports[Number(canvas.dataset.reportIndex)];
-    drawUwbMovement(canvas, evidenceHistory(report));
-  }
   initClipViewers(root);
+  initUwbAnimations(root, reports);
 }
 function refreshMetrics(state) {
   const devices = Object.values(state.devices || {});
@@ -668,17 +832,23 @@ function refreshMetrics(state) {
   document.getElementById('clock').textContent = new Date().toLocaleTimeString();
 }
 async function refresh() {
-  const res = await fetch('/api/state', {cache: 'no-store'});
-  const state = await res.json();
-  refreshMetrics(state);
-  renderDevices(state);
-  renderReports(state);
-  document.getElementById('raw').textContent = JSON.stringify({lora: state.lora, devices: state.devices}, null, 2);
+  if (refreshInFlight) return;
+  refreshInFlight = true;
+  try {
+    const res = await fetch('/api/state', {cache: 'no-store'});
+    const state = await res.json();
+    refreshMetrics(state);
+    renderDevices(state);
+    renderReports(state);
+    document.getElementById('raw').textContent = JSON.stringify({lora: state.lora, devices: state.devices}, null, 2);
+  } catch (err) {
+    document.getElementById('reports').innerHTML = `<div class="empty">${escapeHtml(err)}</div>`;
+  } finally {
+    refreshInFlight = false;
+  }
 }
 setInterval(refresh, 1000);
-refresh().catch(err => {
-  document.getElementById('reports').innerHTML = `<div class="empty">${escapeHtml(err)}</div>`;
-});
+refresh();
 </script>
 </body>
 </html>
@@ -686,7 +856,10 @@ refresh().catch(err => {
 
 
 class StateStore:
-    def __init__(self, max_reports=100):
+    LORA_PRIORITY_WINDOW_SEC = 15.0
+    MAX_REPORT_UWB_HISTORY = 20
+
+    def __init__(self, max_reports=30):
         self.lock = threading.Lock()
         self.devices = {}
         self.reports = []
@@ -702,7 +875,8 @@ class StateStore:
     def update_ping(self, payload, transport):
         now = time.time()
         device_id = str(payload.get('device_id') or payload.get('worker_id') or 'unknown')
-        device = {
+        devices = {
+            device_id: {
             'device_id': device_id,
             'device_type': payload.get('device_type') or payload.get('type') or 'unknown',
             'level': payload.get('level') or payload.get('warning_level') or 'unknown',
@@ -710,9 +884,63 @@ class StateStore:
             'age_sec': 0.0,
             'transport': transport,
             'payload': payload,
+            },
         }
+
+        uwb_detail = (
+            payload.get('active_sources', {})
+            .get('uwb', {})
+            .get('detail', {})
+        )
+        workers = uwb_detail.get('workers', [])
+        if isinstance(workers, list):
+            for worker in workers:
+                if not isinstance(worker, dict):
+                    continue
+                worker_id = str(
+                    worker.get('id') or worker.get('worker_id') or ''
+                ).strip()
+                if not worker_id:
+                    continue
+                worker_age = max(0.0, float(worker.get('age_sec') or 0.0))
+                worker_payload = dict(worker)
+                worker_payload.update({
+                    'type': 'worker_ping',
+                    'device_id': worker_id,
+                    'worker_id': worker_id,
+                    'device_type': 'worker',
+                    'level': worker.get('warning_level') or 'unknown',
+                    'time': now - worker_age,
+                    'relay_device_id': device_id,
+                })
+                devices[worker_id] = {
+                    'device_id': worker_id,
+                    'device_type': 'worker',
+                    'level': worker_payload['level'],
+                    'time': worker_payload['time'],
+                    'age_sec': worker_age,
+                    'transport': f'{transport}-relay',
+                    'payload': worker_payload,
+                }
+
         with self.lock:
-            self.devices[device_id] = device
+            for candidate_id, candidate in devices.items():
+                existing = self.devices.get(candidate_id)
+                lora_is_fresh = (
+                    existing is not None
+                    and existing.get('transport') == 'lora'
+                    and now - float(existing.get('time', 0.0))
+                    <= self.LORA_PRIORITY_WINDOW_SEC
+                )
+                if lora_is_fresh and candidate.get('transport') != 'lora':
+                    enriched_payload = dict(candidate.get('payload') or {})
+                    enriched_payload['primary_transport'] = 'lora'
+                    enriched_payload['lora_payload'] = existing.get('payload', {})
+                    existing = dict(existing)
+                    existing['payload'] = enriched_payload
+                    self.devices[candidate_id] = existing
+                    continue
+                self.devices[candidate_id] = candidate
 
     def add_report(self, payload, transport):
         now = time.time()
@@ -728,6 +956,163 @@ class StateStore:
         with self.lock:
             self.reports.append(report)
             self.reports = self.reports[-self.max_reports:]
+
+    @classmethod
+    def _limited_samples(cls, samples):
+        if len(samples) <= cls.MAX_REPORT_UWB_HISTORY:
+            return samples
+        if cls.MAX_REPORT_UWB_HISTORY <= 1:
+            return samples[-cls.MAX_REPORT_UWB_HISTORY:]
+        last = len(samples) - 1
+        steps = cls.MAX_REPORT_UWB_HISTORY - 1
+        indices = sorted({
+            int(round(index * last / steps))
+            for index in range(cls.MAX_REPORT_UWB_HISTORY)
+        })
+        return [samples[index] for index in indices]
+
+    @staticmethod
+    def _compact_ranges(ranges):
+        compact = []
+        if not isinstance(ranges, list):
+            return compact
+        for item in ranges:
+            if not isinstance(item, dict):
+                continue
+            compact_item = {}
+            for key in ('anchor_id', 'distance_m'):
+                if key in item:
+                    compact_item[key] = item[key]
+            if compact_item:
+                compact.append(compact_item)
+        return compact
+
+    @classmethod
+    def _compact_worker(cls, worker):
+        if not isinstance(worker, dict):
+            return {}
+        keep = (
+            'id',
+            'worker_id',
+            'x',
+            'y',
+            'display_x',
+            'display_y',
+            'display_position_valid',
+            'distance_to_machine_m',
+            'display_distance_to_machine_m',
+            'range_count',
+            'position_quality',
+            'warning_level',
+            'display_mode',
+        )
+        compact = {
+            key: worker[key]
+            for key in keep
+            if key in worker
+        }
+        for key in ('velocity', 'display_velocity'):
+            value = worker.get(key)
+            if isinstance(value, dict):
+                compact[key] = {
+                    subkey: value[subkey]
+                    for subkey in ('vx', 'vy', 'speed_mps')
+                    if subkey in value
+                }
+        ranges = cls._compact_ranges(worker.get('ranges'))
+        if ranges:
+            compact['ranges'] = ranges
+        return compact
+
+    @classmethod
+    def _compact_uwb_sample(cls, sample):
+        if not isinstance(sample, dict):
+            return {}
+        compact = {}
+        for key in ('time', 'frame', 'axis', 'zones'):
+            if key in sample:
+                compact[key] = sample[key]
+        anchors = sample.get('anchors')
+        if isinstance(anchors, list):
+            compact['anchors'] = [
+                {
+                    key: anchor[key]
+                    for key in ('id', 'x', 'y')
+                    if isinstance(anchor, dict) and key in anchor
+                }
+                for anchor in anchors
+                if isinstance(anchor, dict)
+            ]
+        workers = sample.get('workers')
+        if isinstance(workers, list):
+            compact['workers'] = [
+                cls._compact_worker(worker)
+                for worker in workers
+                if isinstance(worker, dict)
+            ]
+        return compact
+
+    @classmethod
+    def _compact_evidence(cls, evidence):
+        if not isinstance(evidence, dict):
+            return evidence
+        compact = {}
+        if 'window' in evidence:
+            compact['window'] = evidence['window']
+        snapshot = cls._compact_uwb_sample(evidence.get('uwb_snapshot'))
+        if snapshot:
+            compact['uwb_snapshot'] = snapshot
+        history = evidence.get('uwb_history')
+        if isinstance(history, list):
+            compact_history = [
+                cls._compact_uwb_sample(sample)
+                for sample in history
+                if isinstance(sample, dict)
+            ]
+            compact['uwb_history'] = cls._limited_samples(compact_history)
+        return compact
+
+    @staticmethod
+    def _compact_status(status):
+        if not isinstance(status, dict):
+            return status
+        compact = {
+            key: status[key]
+            for key in (
+                'type',
+                'time',
+                'device_id',
+                'device_type',
+                'level',
+                'message',
+            )
+            if key in status
+        }
+        active_sources = status.get('active_sources')
+        if isinstance(active_sources, dict):
+            compact['active_sources'] = {}
+            for name, source in active_sources.items():
+                if not isinstance(source, dict):
+                    continue
+                compact['active_sources'][name] = {
+                    key: source[key]
+                    for key in ('level', 'time', 'age_sec')
+                    if key in source
+                }
+        return compact
+
+    @classmethod
+    def _compact_report(cls, report):
+        compact = dict(report)
+        payload = compact.get('payload')
+        if isinstance(payload, dict):
+            payload = dict(payload)
+            if isinstance(payload.get('status'), dict):
+                payload['status'] = cls._compact_status(payload['status'])
+            if isinstance(payload.get('evidence'), dict):
+                payload['evidence'] = cls._compact_evidence(payload['evidence'])
+            compact['payload'] = payload
+        return compact
 
     def update_lora(self, **kwargs):
         with self.lock:
@@ -745,7 +1130,10 @@ class StateStore:
                 'time': now,
                 'hostname': socket.gethostname(),
                 'devices': devices,
-                'reports': list(self.reports),
+                'reports': [
+                    self._compact_report(report)
+                    for report in self.reports[-self.max_reports:]
+                ],
                 'lora': dict(self.lora),
             }
 

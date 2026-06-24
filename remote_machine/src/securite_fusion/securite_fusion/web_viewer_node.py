@@ -95,7 +95,7 @@ HTML_PAGE = """<!doctype html>
 <main>
   <section>
     <h2>Camera fusion</h2>
-    <img id="camera" src="/snapshot.jpg" alt="fusion overlay">
+    <img id="camera" src="/stream.mjpg" alt="fusion overlay">
     <pre id="status">waiting...</pre>
   </section>
   <section>
@@ -118,19 +118,27 @@ const uwbEl = document.getElementById('uwb');
 const workerCountEl = document.getElementById('worker-count');
 const nearestWorkerEl = document.getElementById('nearest-worker');
 const uwbAgeEl = document.getElementById('uwb-age');
+let statusInFlight = false;
+let uwbInFlight = false;
 
 async function refreshStatus() {
+  if (statusInFlight) return;
+  statusInFlight = true;
   try {
     const res = await fetch('/status.json', { cache: 'no-store' });
     statusEl.textContent = JSON.stringify(await res.json(), null, 2);
   } catch (err) {
     statusEl.textContent = String(err);
+  } finally {
+    statusInFlight = false;
   }
 }
 
-function refreshCamera() {
-  cameraEl.src = `/snapshot.jpg?t=${Date.now()}`;
-}
+cameraEl.addEventListener('error', () => {
+  setTimeout(() => {
+    cameraEl.src = `/stream.mjpg?t=${Date.now()}`;
+  }, 1000);
+});
 
 function worldToCanvas(x, y, scale, cx, cy) {
   return [cx + x * scale, cy - y * scale];
@@ -148,6 +156,28 @@ function drawCircle(x, y, radius, stroke, fill, lineWidth = 2) {
   ctx.stroke();
 }
 
+function finiteNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function workerDisplayPosition(worker) {
+  if (worker.display_position_valid === false) return null;
+  const displayX = finiteNumber(worker.display_x);
+  const displayY = finiteNumber(worker.display_y);
+  if (displayX !== null && displayY !== null) return [displayX, displayY];
+  const rawX = finiteNumber(worker.x);
+  const rawY = finiteNumber(worker.y);
+  if (rawX !== null && rawY !== null) return [rawX, rawY];
+  return null;
+}
+
+function workerDistance(worker) {
+  const displayDistance = finiteNumber(worker.display_distance_to_machine_m);
+  if (displayDistance !== null) return displayDistance;
+  return finiteNumber(worker.distance_to_machine_m);
+}
+
 function drawMap(data) {
   const width = canvas.width;
   const height = canvas.height;
@@ -162,8 +192,9 @@ function drawMap(data) {
     maxExtent = Math.max(maxExtent, Math.abs(a.x), Math.abs(a.y));
   }
   for (const w of workers) {
-    if (Number.isFinite(w.x) && Number.isFinite(w.y)) {
-      maxExtent = Math.max(maxExtent, Math.abs(w.x), Math.abs(w.y));
+    const position = workerDisplayPosition(w);
+    if (position) {
+      maxExtent = Math.max(maxExtent, Math.abs(position[0]), Math.abs(position[1]));
     }
     for (const r of w.ranges || []) {
       const a = anchors.find(item => item.id === r.anchor_id);
@@ -225,7 +256,11 @@ function drawMap(data) {
 
   let nearest = null;
   for (const w of workers) {
-    const [x, y] = worldToCanvas(w.x, w.y, scale, cx, cy);
+    const position = workerDisplayPosition(w);
+    if (!position) continue;
+    const [workerX, workerY] = position;
+    const [x, y] = worldToCanvas(workerX, workerY, scale, cx, cy);
+    const distance = workerDistance(w);
     const level = w.warning_level || 'clear';
     const color = level === 'critical' ? '#ff3b3b' :
       level === 'warning' ? '#ffb81c' : '#4ade80';
@@ -251,13 +286,14 @@ function drawMap(data) {
     }
 
     drawCircle(x, y, partial ? 10 : 12, color, partial ? 'rgba(0,0,0,0)' : color, 2);
-    const vx = w.velocity?.vx || 0;
-    const vy = w.velocity?.vy || 0;
-    const speed = w.velocity?.speed_mps || 0;
+    const displayVelocity = w.display_velocity || w.velocity || {};
+    const vx = displayVelocity.vx || 0;
+    const vy = displayVelocity.vy || 0;
+    const speed = displayVelocity.speed_mps || 0;
     if (speed > 0.03) {
       const [ex, ey] = worldToCanvas(
-        w.x + vx * 1.2,
-        w.y + vy * 1.2,
+        workerX + vx * 1.2,
+        workerY + vy * 1.2,
         scale,
         cx,
         cy
@@ -270,25 +306,29 @@ function drawMap(data) {
     ctx.fillStyle = '#ffffff';
     ctx.font = '14px Arial';
     const rangeText = `${w.range_count || (w.ranges || []).length}/${anchors.length}`;
-    const qualityText = partial ? ` ${w.position_quality}` : '';
+    const modeText = w.display_mode && w.display_mode !== 'uwb' ? ` ${w.display_mode}` : '';
+    const qualityText = partial ? ` ${w.position_quality}${modeText}` : modeText;
+    const distanceText = distance !== null ? `${distance.toFixed(2)}m` : 'n/a';
     ctx.fillText(
-      `${w.id} ${w.distance_to_machine_m.toFixed(2)}m ${rangeText}${qualityText}`,
+      `${w.id} ${distanceText} ${rangeText}${qualityText}`,
       x + 16,
       y - 10
     );
-    if (!nearest || w.distance_to_machine_m < nearest.distance_to_machine_m) {
-      nearest = w;
+    if (distance !== null && (!nearest || distance < nearest.distance)) {
+      nearest = { id: w.id, distance };
     }
   }
 
   workerCountEl.textContent = workers.length.toString();
   nearestWorkerEl.textContent = nearest ?
-    `${nearest.id} ${nearest.distance_to_machine_m.toFixed(2)} m` : 'n/a';
+    `${nearest.id} ${nearest.distance.toFixed(2)} m` : 'n/a';
   uwbAgeEl.textContent = data.time ?
     `${Math.max(0, Date.now() / 1000 - data.time).toFixed(1)} s` : 'n/a';
 }
 
 async function refreshUwb() {
+  if (uwbInFlight) return;
+  uwbInFlight = true;
   try {
     const res = await fetch('/uwb.json', { cache: 'no-store' });
     const data = await res.json();
@@ -297,15 +337,15 @@ async function refreshUwb() {
   } catch (err) {
     uwbEl.textContent = String(err);
     drawMap({ anchors: [], workers: [] });
+  } finally {
+    uwbInFlight = false;
   }
 }
 
 setInterval(refreshStatus, 500);
 setInterval(refreshUwb, 250);
-setInterval(refreshCamera, 500);
 refreshStatus();
 refreshUwb();
-refreshCamera();
 </script>
 </body>
 </html>

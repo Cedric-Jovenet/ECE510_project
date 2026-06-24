@@ -5,6 +5,7 @@ import re
 import signal
 import subprocess
 import threading
+import time
 from typing import Optional
 
 import numpy as np
@@ -24,7 +25,7 @@ class Pi5RawCameraNode(Node):
     def __init__(self):
         super().__init__('camera_raw_node')
 
-        self.declare_parameter('device', '/dev/video0')
+        self.declare_parameter('device', 'auto')
         self.declare_parameter('media_device', 'auto')
         self.declare_parameter('width', 640)
         self.declare_parameter('height', 480)
@@ -40,9 +41,17 @@ class Pi5RawCameraNode(Node):
         self.declare_parameter('analogue_gain', 120)
         self.declare_parameter('digital_gain', 1024)
         self.declare_parameter('exposure', 1600)
+        self.declare_parameter('reconnect_initial_delay_sec', 1.0)
+        self.declare_parameter('reconnect_max_delay_sec', 10.0)
 
-        self.device = self.get_parameter('device').value
-        self.media_device = self.get_parameter('media_device').value
+        self.device_setting = str(self.get_parameter('device').value)
+        self.media_device_setting = str(
+            self.get_parameter('media_device').value
+        )
+        self.device = None
+        self.media_device = None
+        self.sensor_device = None
+        self.csi_device = None
         self.width = int(self.get_parameter('width').value)
         self.height = int(self.get_parameter('height').value)
         self.topic = self.get_parameter('topic').value
@@ -65,6 +74,14 @@ class Pi5RawCameraNode(Node):
         self.analogue_gain = int(self.get_parameter('analogue_gain').value)
         self.digital_gain = int(self.get_parameter('digital_gain').value)
         self.exposure = int(self.get_parameter('exposure').value)
+        self.reconnect_initial_delay_sec = max(
+            0.1,
+            float(self.get_parameter('reconnect_initial_delay_sec').value),
+        )
+        self.reconnect_max_delay_sec = max(
+            self.reconnect_initial_delay_sec,
+            float(self.get_parameter('reconnect_max_delay_sec').value),
+        )
         self.debayer_code = self._debayer_code()
 
         self.frame_size = self.width * self.height * 10 // 8
@@ -78,9 +95,6 @@ class Pi5RawCameraNode(Node):
                 'python3-opencv is required to debayer camera frames'
             )
 
-        self._configure_camera()
-        self._start_capture_process()
-
         self._capture_thread = threading.Thread(
             target=self._capture_loop,
             name='pi5-raw-camera-capture',
@@ -88,9 +102,10 @@ class Pi5RawCameraNode(Node):
         )
         self._capture_thread.start()
         self.get_logger().info(
-            'Publishing '
-            f'{self.width}x{self.height} IMX219 frames on {self.topic}; '
-            f'bayer={self.bayer_pattern}, enhance={self.auto_enhance}'
+            'Camera publisher ready; waiting for IMX219 and publishing '
+            f'{self.width}x{self.height} frames on {self.topic}; '
+            f'bayer={self.bayer_pattern}, enhance={self.auto_enhance}, '
+            'automatic_reconnect=True'
         )
 
     def _run_command(self, command):
@@ -138,12 +153,50 @@ class Pi5RawCameraNode(Node):
                 return match.group(1)
         raise RuntimeError(f'Could not find media entity {entity_name!r}')
 
+    def _find_entity_device(self, topology, entity_name, prefix=False):
+        entity_pattern = re.compile(r'^\s*-\s+entity\s+\d+:\s+(.+?)\s+\(')
+        device_pattern = re.compile(r'^\s*device node name\s+(\S+)')
+        in_entity = False
+
+        for line in topology.splitlines():
+            entity_match = entity_pattern.match(line)
+            if entity_match:
+                name = entity_match.group(1)
+                in_entity = (
+                    name.startswith(entity_name) if prefix
+                    else name == entity_name
+                )
+                continue
+            if in_entity:
+                device_match = device_pattern.match(line)
+                if device_match:
+                    return device_match.group(1)
+
+        raise RuntimeError(
+            f'Could not find device node for media entity {entity_name!r}'
+        )
+
     def _configure_camera(self):
-        if self.media_device == 'auto':
+        if self.media_device_setting == 'auto':
             self.media_device = self._detect_media_device()
+        else:
+            self.media_device = self.media_device_setting
         topology = self._read_media_topology(self.media_device)
         csi_entity = self._find_entity_id(topology, 'csi2')
         ch0_entity = self._find_entity_id(topology, 'rp1-cfe-csi2_ch0')
+        self.csi_device = self._find_entity_device(topology, 'csi2')
+        self.sensor_device = self._find_entity_device(
+            topology,
+            'imx219 ',
+            prefix=True,
+        )
+        if self.device_setting == 'auto':
+            self.device = self._find_entity_device(
+                topology,
+                'rp1-cfe-csi2_ch0',
+            )
+        else:
+            self.device = self.device_setting
         self._run_command([
             'media-ctl',
             '-d',
@@ -152,9 +205,9 @@ class Pi5RawCameraNode(Node):
             f'{csi_entity}:4->{ch0_entity}:0[1]',
         ])
         for device, pad in (
-            ('/dev/v4l-subdev2', 0),
-            ('/dev/v4l-subdev0', 0),
-            ('/dev/v4l-subdev0', 4),
+            (self.sensor_device, 0),
+            (self.csi_device, 0),
+            (self.csi_device, 4),
         ):
             self._run_command([
                 'v4l2-ctl',
@@ -188,7 +241,7 @@ class Pi5RawCameraNode(Node):
         self._run_command([
             'v4l2-ctl',
             '-d',
-            '/dev/v4l-subdev2',
+            self.sensor_device,
             f'--set-ctrl={",".join(controls)}',
         ])
 
@@ -200,35 +253,38 @@ class Pi5RawCameraNode(Node):
             f'--stream-mmap={self.stream_buffers}',
             '--stream-to=-',
         ]
-        self._process = subprocess.Popen(
+        process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             bufsize=0,
             preexec_fn=_terminate_child_with_parent,
         )
+        self._process = process
         threading.Thread(
             target=self._log_capture_stderr,
+            args=(process,),
             name='pi5-raw-camera-v4l2-stderr',
             daemon=True,
         ).start()
+        return process
 
-    def _log_capture_stderr(self):
-        if self._process is None or self._process.stderr is None:
+    def _log_capture_stderr(self, process):
+        if process.stderr is None:
             return
-        for line in self._process.stderr:
+        for line in process.stderr:
             text = line.decode(errors='replace').strip()
             if text:
                 self.get_logger().warning(f'v4l2-ctl: {text}')
 
-    def _read_exact_frame(self):
-        if self._process is None or self._process.stdout is None:
+    def _read_exact_frame(self, process):
+        if process.stdout is None:
             return None
 
         chunks = []
         remaining = self.frame_size
         while self._running.is_set() and remaining > 0:
-            chunk = self._process.stdout.read(remaining)
+            chunk = process.stdout.read(remaining)
             if not chunk:
                 return None
             chunks.append(chunk)
@@ -292,40 +348,93 @@ class Pi5RawCameraNode(Node):
             )
         return codes[self.bayer_pattern]
 
+    def _stop_capture_process(self, process=None):
+        process = process or self._process
+        if process is None:
+            return
+        if self._process is process:
+            self._process = None
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.stderr is not None:
+            process.stderr.close()
+
+    def _wait_for_retry(self, delay_sec):
+        deadline = time.monotonic() + delay_sec
+        while self._running.is_set() and time.monotonic() < deadline:
+            time.sleep(max(0.0, min(0.2, deadline - time.monotonic())))
+
     def _capture_loop(self):
-        frame_count = 0
+        ever_published = False
+        retry_delay = self.reconnect_initial_delay_sec
         while self._running.is_set():
-            frame = self._read_exact_frame()
-            if frame is None:
+            process = None
+            session_frames = 0
+            try:
+                self._configure_camera()
+                process = self._start_capture_process()
+                self.get_logger().info(
+                    f'Camera capture started on {self.device} via '
+                    f'{self.media_device}'
+                )
+
+                while self._running.is_set():
+                    frame = self._read_exact_frame(process)
+                    if frame is None:
+                        raise RuntimeError('Camera stream ended unexpectedly')
+
+                    rgb = self._raw10_to_rgb(frame)
+                    msg = Image()
+                    msg.header.stamp = self.get_clock().now().to_msg()
+                    msg.header.frame_id = self.frame_id
+                    msg.height = self.height
+                    msg.width = self.width
+                    msg.encoding = 'rgb8'
+                    msg.is_bigendian = False
+                    msg.step = self.width * 3
+                    msg.data = rgb.tobytes()
+                    self.publisher.publish(msg)
+
+                    session_frames += 1
+                    retry_delay = self.reconnect_initial_delay_sec
+                    if session_frames == 1:
+                        if ever_published:
+                            self.get_logger().info(
+                                'Camera stream recovered; publishing frames again'
+                            )
+                        else:
+                            self.get_logger().info(
+                                'First camera frame published'
+                            )
+                            ever_published = True
+            except Exception as exc:
                 if self._running.is_set():
-                    self.get_logger().error('Camera stream ended unexpectedly')
-                    rclpy.shutdown()
-                return
+                    self.get_logger().warning(
+                        f'Camera unavailable: {exc}; retrying in '
+                        f'{retry_delay:.1f}s'
+                    )
+            finally:
+                self._stop_capture_process(process)
 
-            rgb = self._raw10_to_rgb(frame)
-            msg = Image()
-            msg.header.stamp = self.get_clock().now().to_msg()
-            msg.header.frame_id = self.frame_id
-            msg.height = self.height
-            msg.width = self.width
-            msg.encoding = 'rgb8'
-            msg.is_bigendian = False
-            msg.step = self.width * 3
-            msg.data = rgb.tobytes()
-            self.publisher.publish(msg)
-
-            frame_count += 1
-            if frame_count == 1:
-                self.get_logger().info('First camera frame published')
+            if self._running.is_set():
+                self._wait_for_retry(retry_delay)
+                retry_delay = min(
+                    self.reconnect_max_delay_sec,
+                    retry_delay * 2.0,
+                )
 
     def destroy_node(self):
         self._running.clear()
-        if self._process is not None and self._process.poll() is None:
-            self._process.terminate()
-            try:
-                self._process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                self._process.kill()
+        self._stop_capture_process()
+        if self._capture_thread.is_alive():
+            self._capture_thread.join(timeout=3)
         super().destroy_node()
 
 

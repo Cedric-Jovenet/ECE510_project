@@ -24,6 +24,17 @@ class WorkerState:
         self.position: Optional[Tuple[float, float]] = None
         self.last_time: Optional[float] = None
         self.velocity = (0.0, 0.0)
+        self.display_position: Optional[Tuple[float, float]] = None
+        self.display_last_time: Optional[float] = None
+        self.display_velocity = (0.0, 0.0)
+        self.display_mode = 'none'
+        self.display_rejected_count = 0
+        self.last_reliable_time: Optional[float] = None
+        self.imu_accel = (0.0, 0.0)
+        self.imu_bias: Optional[Tuple[float, float]] = None
+        self.imu_last_time: Optional[float] = None
+        self.imu_prediction_count = 0
+        self.reliable_candidates = []
         self.error: Optional[float] = None
         self.position_quality = 'none'
         self.range_count = 0
@@ -38,15 +49,32 @@ class UwbPositionNode(Node):
         super().__init__('uwb_position_node')
 
         self.declare_parameter('ranges_topic', '/uwb/ranges')
+        self.declare_parameter('imu_topic', '/uwb/imu')
         self.declare_parameter('workers_topic', '/uwb/workers')
         self.declare_parameter('anchor_positions_json', json.dumps(DEFAULT_ANCHORS))
         self.declare_parameter('range_timeout_sec', 1.5)
         self.declare_parameter('stale_display_sec', 15.0)
         self.declare_parameter('publish_period_sec', 0.1)
         self.declare_parameter('smoothing_alpha', 0.35)
+        self.declare_parameter('display_smoothing_alpha', 0.22)
+        self.declare_parameter('display_max_speed_mps', 1.4)
+        self.declare_parameter('display_jump_tolerance_m', 0.45)
+        self.declare_parameter('display_hold_sec', 2.5)
+        self.declare_parameter('display_seed_min_reliable_samples', 3)
+        self.declare_parameter('display_seed_max_spread_m', 0.8)
+        self.declare_parameter('display_seed_window_sec', 2.0)
+        self.declare_parameter('imu_prediction_max_sec', 4.0)
+        self.declare_parameter('imu_sample_timeout_sec', 1.0)
+        self.declare_parameter('imu_accel_deadband_mps2', 0.18)
+        self.declare_parameter('imu_max_accel_mps2', 2.5)
+        self.declare_parameter('imu_velocity_decay', 0.86)
+        self.declare_parameter('imu_x_axis', 'ax')
+        self.declare_parameter('imu_y_axis', 'ay')
+        self.declare_parameter('imu_x_sign', 1.0)
+        self.declare_parameter('imu_y_sign', 1.0)
         self.declare_parameter('max_trilateration_error_m', 1.0)
-        self.declare_parameter('critical_radius_m', 1.5)
-        self.declare_parameter('warning_radius_m', 3.0)
+        self.declare_parameter('critical_radius_m', 2.0)
+        self.declare_parameter('warning_radius_m', 2.0)
 
         self.anchors = self._load_anchors()
         self.range_timeout = float(self.get_parameter('range_timeout_sec').value)
@@ -54,6 +82,46 @@ class UwbPositionNode(Node):
             self.get_parameter('stale_display_sec').value
         )
         self.smoothing_alpha = float(self.get_parameter('smoothing_alpha').value)
+        self.display_smoothing_alpha = float(
+            self.get_parameter('display_smoothing_alpha').value
+        )
+        self.display_max_speed = float(
+            self.get_parameter('display_max_speed_mps').value
+        )
+        self.display_jump_tolerance = float(
+            self.get_parameter('display_jump_tolerance_m').value
+        )
+        self.display_hold_sec = float(
+            self.get_parameter('display_hold_sec').value
+        )
+        self.display_seed_min_reliable_samples = int(
+            self.get_parameter('display_seed_min_reliable_samples').value
+        )
+        self.display_seed_max_spread = float(
+            self.get_parameter('display_seed_max_spread_m').value
+        )
+        self.display_seed_window = float(
+            self.get_parameter('display_seed_window_sec').value
+        )
+        self.imu_prediction_max_sec = float(
+            self.get_parameter('imu_prediction_max_sec').value
+        )
+        self.imu_sample_timeout_sec = float(
+            self.get_parameter('imu_sample_timeout_sec').value
+        )
+        self.imu_accel_deadband = float(
+            self.get_parameter('imu_accel_deadband_mps2').value
+        )
+        self.imu_max_accel = float(
+            self.get_parameter('imu_max_accel_mps2').value
+        )
+        self.imu_velocity_decay = float(
+            self.get_parameter('imu_velocity_decay').value
+        )
+        self.imu_x_axis = str(self.get_parameter('imu_x_axis').value)
+        self.imu_y_axis = str(self.get_parameter('imu_y_axis').value)
+        self.imu_x_sign = float(self.get_parameter('imu_x_sign').value)
+        self.imu_y_sign = float(self.get_parameter('imu_y_sign').value)
         self.max_trilateration_error = float(
             self.get_parameter('max_trilateration_error_m').value
         )
@@ -72,6 +140,12 @@ class UwbPositionNode(Node):
             String,
             self.get_parameter('ranges_topic').value,
             self.range_callback,
+            50,
+        )
+        self.create_subscription(
+            String,
+            self.get_parameter('imu_topic').value,
+            self.imu_callback,
             50,
         )
         period = float(self.get_parameter('publish_period_sec').value)
@@ -124,6 +198,20 @@ class UwbPositionNode(Node):
             'port': sample.get('port'),
         }
         self._update_position(worker_id, state, now)
+
+    def imu_callback(self, msg):
+        try:
+            sample = json.loads(msg.data)
+        except json.JSONDecodeError as exc:
+            self.get_logger().warning(f'Invalid IMU JSON: {exc}')
+            return
+
+        worker_id = str(sample.get('worker_id', 'worker4'))
+        state = self.workers.setdefault(worker_id, WorkerState())
+        now = float(sample.get('time', time.time()))
+        self._record_imu(state, sample, now)
+        if self._display_needs_prediction(state, now):
+            self._predict_display_from_imu(state, now)
 
     def _update_position(self, worker_id, state, now):
         fresh_ranges = self._fresh_ranges(state, now)
@@ -197,6 +285,197 @@ class UwbPositionNode(Node):
         state.error = error
         state.position_quality = quality
         state.ambiguous = ambiguous
+        if self._is_reliable_position(quality, error, state.distance_bounds):
+            if state.display_position is None:
+                self._seed_display_position(state, smoothed, now)
+            else:
+                state.last_reliable_time = now
+                self._update_display_position(state, smoothed, now)
+        else:
+            state.reliable_candidates = []
+            state.display_rejected_count += 1
+            self._predict_display_from_imu(state, now)
+
+    def _record_imu(self, state, sample, now):
+        try:
+            raw_x = float(sample[self.imu_x_axis]) * self.imu_x_sign
+            raw_y = float(sample[self.imu_y_axis]) * self.imu_y_sign
+        except (KeyError, TypeError, ValueError):
+            return
+        if not math.isfinite(raw_x) or not math.isfinite(raw_y):
+            return
+
+        if state.imu_bias is None:
+            state.imu_bias = (raw_x, raw_y)
+        else:
+            bias_x, bias_y = state.imu_bias
+            speed = math.hypot(*state.display_velocity)
+            alpha = 0.025 if speed < 0.08 else 0.002
+            state.imu_bias = (
+                bias_x * (1.0 - alpha) + raw_x * alpha,
+                bias_y * (1.0 - alpha) + raw_y * alpha,
+            )
+
+        bias_x, bias_y = state.imu_bias
+        accel_x = raw_x - bias_x
+        accel_y = raw_y - bias_y
+        accel_norm = math.hypot(accel_x, accel_y)
+        if accel_norm < max(0.0, self.imu_accel_deadband):
+            accel_x = 0.0
+            accel_y = 0.0
+        elif accel_norm > max(0.1, self.imu_max_accel):
+            scale = max(0.1, self.imu_max_accel) / accel_norm
+            accel_x *= scale
+            accel_y *= scale
+
+        state.imu_accel = (accel_x, accel_y)
+        state.imu_last_time = now
+
+    def _display_needs_prediction(self, state, now):
+        if state.display_position is None or state.display_last_time is None:
+            return False
+        if state.last_reliable_time is None:
+            return False
+        if state.ambiguous:
+            return True
+        if state.last_time is None:
+            return False
+        return now - state.last_time > self.range_timeout
+
+    def _is_reliable_position(self, quality, error, bounds):
+        lower, upper = bounds
+        if upper is not None and lower > upper:
+            return False
+        return (
+            quality == 'trilaterated'
+            and error is not None
+            and error <= self.max_trilateration_error
+        )
+
+    def _seed_display_position(self, state, target, now):
+        state.reliable_candidates.append((now, target[0], target[1]))
+        cutoff = now - max(0.1, self.display_seed_window)
+        state.reliable_candidates = [
+            item for item in state.reliable_candidates if item[0] >= cutoff
+        ]
+
+        min_samples = max(1, self.display_seed_min_reliable_samples)
+        if len(state.reliable_candidates) < min_samples:
+            state.display_mode = 'waiting_stable_uwb'
+            return
+
+        recent = state.reliable_candidates[-min_samples:]
+        center_x = sum(item[1] for item in recent) / len(recent)
+        center_y = sum(item[2] for item in recent) / len(recent)
+        spread = max(
+            math.hypot(item[1] - center_x, item[2] - center_y)
+            for item in recent
+        )
+        if spread > max(0.05, self.display_seed_max_spread):
+            state.display_mode = 'waiting_stable_uwb'
+            return
+
+        state.display_position = (center_x, center_y)
+        state.display_last_time = now
+        state.display_velocity = (0.0, 0.0)
+        state.display_mode = 'uwb_seed'
+        state.last_reliable_time = now
+
+    def _update_display_position(self, state, target, now):
+        if state.display_position is None or state.display_last_time is None:
+            state.display_position = target
+            state.display_last_time = now
+            state.display_velocity = (0.0, 0.0)
+            state.display_mode = 'uwb'
+            return
+
+        old_x, old_y = state.display_position
+        dx = target[0] - old_x
+        dy = target[1] - old_y
+        jump = math.hypot(dx, dy)
+        dt = max(1e-3, now - state.display_last_time)
+        max_speed = max(0.1, self.display_max_speed)
+        allowed_jump = max(0.05, self.display_jump_tolerance) + max_speed * dt
+        max_step = max(0.03, max_speed * dt)
+
+        if jump > allowed_jump:
+            state.display_rejected_count += 1
+            ratio = min(1.0, max_step / jump)
+            next_x = old_x + dx * ratio
+            next_y = old_y + dy * ratio
+            state.display_position = (next_x, next_y)
+            state.display_velocity = (
+                (next_x - old_x) / dt,
+                (next_y - old_y) / dt,
+            )
+            state.display_last_time = now
+            state.display_mode = 'uwb_limited'
+            return
+
+        alpha = max(0.02, min(1.0, self.display_smoothing_alpha))
+        next_x = old_x + dx * alpha
+        next_y = old_y + dy * alpha
+
+        step = math.hypot(next_x - old_x, next_y - old_y)
+        if step > max_step and step > 0.0:
+            ratio = max_step / step
+            next_x = old_x + (next_x - old_x) * ratio
+            next_y = old_y + (next_y - old_y) * ratio
+
+        state.display_position = (next_x, next_y)
+        state.display_velocity = (
+            (next_x - old_x) / dt,
+            (next_y - old_y) / dt,
+        )
+        state.display_last_time = now
+        state.display_mode = 'uwb'
+
+    def _predict_display_from_imu(self, state, now):
+        if state.display_position is None or state.display_last_time is None:
+            state.display_mode = 'waiting_reliable_uwb'
+            return
+
+        last_reliable = state.last_reliable_time
+        if (
+            last_reliable is None
+            or now - last_reliable > max(0.1, self.imu_prediction_max_sec)
+        ):
+            state.display_velocity = (0.0, 0.0)
+            state.display_last_time = now
+            state.display_mode = 'hold'
+            return
+
+        dt = now - state.display_last_time
+        if dt <= 0.0:
+            return
+        dt = min(dt, 0.25)
+
+        imu_fresh = (
+            state.imu_last_time is not None
+            and now - state.imu_last_time <= max(0.1, self.imu_sample_timeout_sec)
+        )
+        decay = max(0.0, min(1.0, self.imu_velocity_decay))
+        vx, vy = state.display_velocity
+        if imu_fresh:
+            ax, ay = state.imu_accel
+            vx = vx * decay + ax * dt
+            vy = vy * decay + ay * dt
+            speed = math.hypot(vx, vy)
+            max_speed = max(0.1, self.display_max_speed)
+            if speed > max_speed:
+                scale = max_speed / speed
+                vx *= scale
+                vy *= scale
+            old_x, old_y = state.display_position
+            state.display_position = (old_x + vx * dt, old_y + vy * dt)
+            state.display_velocity = (vx, vy)
+            state.display_last_time = now
+            state.display_mode = 'imu_prediction'
+            state.imu_prediction_count += 1
+        else:
+            state.display_velocity = (vx * decay, vy * decay)
+            state.display_last_time = now
+            state.display_mode = 'hold'
 
     def _fresh_ranges(self, state, now):
         fresh = {}
@@ -337,7 +616,28 @@ class UwbPositionNode(Node):
 
             x, y = state.position
             vx, vy = state.velocity
+            display_position_valid = state.display_position is not None
+            display_x = None
+            display_y = None
+            if display_position_valid:
+                display_x, display_y = state.display_position
+            display_vx, display_vy = state.display_velocity
             distance = math.hypot(x, y)
+            display_distance = (
+                math.hypot(display_x, display_y)
+                if display_position_valid
+                else None
+            )
+            imu_age = (
+                None
+                if state.imu_last_time is None
+                else max(0.0, now - state.imu_last_time)
+            )
+            reliable_age = (
+                None
+                if state.last_reliable_time is None
+                else max(0.0, now - state.last_reliable_time)
+            )
             lower_bound, upper_bound = state.distance_bounds
             warning_distance = (
                 distance
@@ -348,7 +648,11 @@ class UwbPositionNode(Node):
                 'id': worker_id,
                 'x': x,
                 'y': y,
+                'display_x': display_x,
+                'display_y': display_y,
+                'display_position_valid': display_position_valid,
                 'distance_to_machine_m': distance,
+                'display_distance_to_machine_m': display_distance,
                 'distance_lower_bound_m': lower_bound,
                 'distance_upper_bound_m': upper_bound,
                 'error_m': getattr(state, 'error', None),
@@ -358,10 +662,21 @@ class UwbPositionNode(Node):
                 'position_quality': quality,
                 'ambiguous': state.ambiguous or stale,
                 'stale': stale,
+                'display_stabilized': True,
+                'display_mode': state.display_mode,
+                'display_rejected_count': state.display_rejected_count,
+                'last_reliable_age_sec': reliable_age,
+                'imu_age_sec': imu_age,
+                'imu_prediction_count': state.imu_prediction_count,
                 'velocity': {
                     'vx': vx,
                     'vy': vy,
                     'speed_mps': math.hypot(vx, vy),
+                },
+                'display_velocity': {
+                    'vx': display_vx,
+                    'vy': display_vy,
+                    'speed_mps': math.hypot(display_vx, display_vy),
                 },
                 'warning_level': self._warning_level(warning_distance),
                 'ranges': displayed_ranges,
