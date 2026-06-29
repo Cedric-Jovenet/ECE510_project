@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Runs YOLO person detection on camera frames and publishes compact JSON boxes
+# plus an optional annotated image for calibration.
 import json
 import time
 

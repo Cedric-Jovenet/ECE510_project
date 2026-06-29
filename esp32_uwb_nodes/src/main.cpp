@@ -1,3 +1,5 @@
+// Entry point for each ESP32 UWB node. Compile-time build flags choose the
+// NODE_ID, initiator/responder role, and optional telemetry transports.
 #include <Arduino.h>
 #include "uwb_lora.h"
 #include "uwb_telemetry.h"

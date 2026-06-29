@@ -1,3 +1,6 @@
+// Hardware probe sketch for the ESP32 IoT carrier.
+// It checks expected I2C, LoRa, and GPS wiring before flashing the real
+// worker-tag firmware.
 #include <Arduino.h>
 #include <Wire.h>
 #include <SPI.h>

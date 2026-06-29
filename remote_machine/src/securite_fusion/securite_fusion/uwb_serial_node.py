@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Bridges JSON or text range samples from USB serial UWB nodes into ROS topics.
+# Port discovery is automatic because USB device order changes across reboots.
 import glob
 import array
 import fcntl

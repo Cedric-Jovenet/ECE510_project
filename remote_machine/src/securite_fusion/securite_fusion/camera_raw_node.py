@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Publishes raw Raspberry Pi CSI camera frames as ROS Image messages.
+# The media-device discovery lives here because Pi 5 `/dev/mediaN` numbering
+# can change between boots and camera-stack restarts.
 import ctypes
 import glob
 import re
@@ -136,6 +139,7 @@ class Pi5RawCameraNode(Node):
         return result.stdout
 
     def _detect_media_device(self):
+        # Prefer the rp1-cfe media graph instead of a fixed `/dev/mediaN` path.
         for media_device in sorted(glob.glob('/dev/media*')):
             try:
                 topology = self._read_media_topology(media_device)
@@ -177,6 +181,8 @@ class Pi5RawCameraNode(Node):
         )
 
     def _configure_camera(self):
+        # Configure the sensor, CSI receiver, and video node as one pipeline so
+        # v4l2-ctl reads raw frames with matching dimensions and pixel format.
         if self.media_device_setting == 'auto':
             self.media_device = self._detect_media_device()
         else:
@@ -372,6 +378,8 @@ class Pi5RawCameraNode(Node):
             time.sleep(max(0.0, min(0.2, deadline - time.monotonic())))
 
     def _capture_loop(self):
+        # Restart v4l2-ctl on failure instead of exiting the ROS node. The rest
+        # of the safety stack can keep running while the camera recovers.
         ever_published = False
         retry_delay = self.reconnect_initial_delay_sec
         while self._running.is_set():

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Publishes synthetic UWB ranges for testing the position and dashboard logic
+# without physical DW3000 nodes.
 import json
 import math
 import signal

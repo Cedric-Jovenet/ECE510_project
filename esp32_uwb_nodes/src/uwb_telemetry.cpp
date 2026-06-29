@@ -1,3 +1,6 @@
+// Optional WiFi/UDP telemetry for UWB nodes.
+// USB serial is treated as the primary lab transport; WiFi only starts when no
+// host heartbeat is received so radio ranging can continue in either mode.
 #include "uwb_telemetry.h"
 #include "uwb_lora.h"
 
@@ -112,6 +115,8 @@ void processSerialInput()
             if (serialCommandLength > 0) {
                 serialCommand[serialCommandLength] = '\0';
                 if (strcmp(serialCommand, "HOST_USB") == 0) {
+                    // The ROS serial bridge sends this heartbeat to reserve the
+                    // transport and prevent WiFi from stealing the telemetry.
                     if (lastUsbHeartbeatMs == 0) {
                         Serial.printf("[NODE] transport=usb node_id=%u\n",
                                       static_cast<unsigned>(NODE_ID));
@@ -134,6 +139,8 @@ void updateTransport()
 {
     processSerialInput();
     if (usbHostActive()) {
+        // Disable WiFi while USB is active to reduce timing noise during UWB
+        // ranging and to avoid duplicate reports.
         stopWifiForUsb();
         return;
     }
@@ -206,6 +213,8 @@ void processRelayPackets()
     payload[length] = '\0';
     if (strstr(payload, "\"type\":\"machine_ping\"") != nullptr &&
         strstr(payload, "\"device_id\":\"machine-1\"") != nullptr) {
+        // Machine status received over WiFi can be relayed over LoRa so worker
+        // tags near the base still see critical machine state.
         uwbLoraSendRelay(payload);
     }
 }

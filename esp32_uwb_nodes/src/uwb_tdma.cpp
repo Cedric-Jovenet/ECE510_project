@@ -1,3 +1,6 @@
+// DW3000 double-sided two-way ranging state machine.
+// One node acts as the initiator and all other nodes answer staged ranging
+// frames; JSON logs are intentionally machine-readable for the ROS bridge.
 #include "uwb_tdma.h"
 #include "uwb_telemetry.h"
 #include <SPI.h>
@@ -109,6 +112,8 @@ static bool waitForExpectedFrame(
     bool loggedRxError = false;
 
     while (millis() - startedMs < timeoutMs) {
+        // Ignore unrelated or malformed frames instead of aborting the whole
+        // ranging cycle; several DW3000 nodes can share the same air channel.
         const int rxStatus = DW3000.receivedFrameSucc();
         if (rxStatus == 0) {
             delay(1);
@@ -238,6 +243,8 @@ static bool doInitiator(uint8_t targetId)
     int tRoundA = 0;
     int tReplyA = 0;
 
+    // DS-TWR exchange: poll -> response -> final -> responder timing info.
+    // The initiator then combines both clocks to estimate distance.
     Serial.printf("[RANGE] Node %u -> Node %u\n", NODE_ID, targetId);
 
     stopRadio();
@@ -294,6 +301,8 @@ static void doResponder()
         return;
     }
 
+    // The responder keeps a tiny stage state so the final frame can be matched
+    // to the poll/response pair that produced its timestamps.
     if (responderStage == 2 && millis() - responderStageStartedMs > RESPONDER_STAGE_TIMEOUT_MS) {
         Serial.printf("[WARN] Responder timeout waiting for final frame from Node %u\n", responderPeer);
         DW3000.clearSystemStatus();
@@ -396,10 +405,12 @@ void uwb_loop()
     maybePrintStatusJson();
 
     if (NODE_ID != INITIATOR_NODE_ID) {
+        // Responders spend almost all of their time in receive mode.
         doResponder();
         return;
     }
 
+    // The initiator owns the schedule so responders do not collide.
     const uint32_t periodMs = SINGLE_PAIR_DEBUG_MODE ? RANGING_PERIOD_DEBUG_MS : RANGING_PERIOD_MS;
     if (millis() - lastRangeTimeMs < periodMs) {
         return;

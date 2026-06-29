@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Converts per-anchor UWB ranges into worker positions for the machine map.
+# Raw estimates are kept separate from display positions so noisy ranges do not
+# make the dashboard jump when the tag temporarily loses good geometry.
 import json
 import math
 import signal
@@ -221,6 +224,8 @@ class UwbPositionNode(Node):
         state.range_count = len(fresh_ranges)
         state.distance_bounds = self._distance_bounds(fresh_ranges)
 
+        # Prefer trilateration when three anchors are fresh. With fewer anchors,
+        # publish a marked ambiguous estimate instead of hiding the worker.
         if len(fresh_ranges) >= 3:
             result = self._trilaterate(fresh_ranges)
             quality = 'trilaterated'
@@ -292,6 +297,8 @@ class UwbPositionNode(Node):
                 state.last_reliable_time = now
                 self._update_display_position(state, smoothed, now)
         else:
+            # Bad geometry can still carry useful distance information, but it
+            # should not snap the displayed worker marker across the map.
             state.reliable_candidates = []
             state.display_rejected_count += 1
             self._predict_display_from_imu(state, now)
@@ -353,6 +360,8 @@ class UwbPositionNode(Node):
         )
 
     def _seed_display_position(self, state, target, now):
+        # Do not show a live marker until several reliable UWB fixes cluster in
+        # the same area. This prevents startup flashes from one-off bad fixes.
         state.reliable_candidates.append((now, target[0], target[1]))
         cutoff = now - max(0.1, self.display_seed_window)
         state.reliable_candidates = [
@@ -399,6 +408,8 @@ class UwbPositionNode(Node):
         max_step = max(0.03, max_speed * dt)
 
         if jump > allowed_jump:
+            # Follow the target at a physically plausible speed instead of
+            # accepting a sudden UWB jump as true movement.
             state.display_rejected_count += 1
             ratio = min(1.0, max_step / jump)
             next_x = old_x + dx * ratio
@@ -450,6 +461,8 @@ class UwbPositionNode(Node):
             return
         dt = min(dt, 0.25)
 
+        # IMU prediction is only short-term continuity after a reliable UWB
+        # seed; it is not allowed to create a position by itself.
         imu_fresh = (
             state.imu_last_time is not None
             and now - state.imu_last_time <= max(0.1, self.imu_sample_timeout_sec)

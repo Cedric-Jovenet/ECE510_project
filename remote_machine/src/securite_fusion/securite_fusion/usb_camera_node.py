@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Simple USB camera publisher used when the CSI raw camera is unavailable.
 import signal
 import time
 

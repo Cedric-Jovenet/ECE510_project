@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Projects LiDAR ranges into the camera image and marks which obstacles line up
+# with YOLO person detections. The published status is the machine-facing
+# safety signal consumed by the IoT supervisor.
 import json
 import math
 import signal
@@ -135,6 +138,8 @@ class FusionNode(Node):
             angles - self.lidar_front_angle
         )
 
+        # Only evaluate the frontal safety cone. Ranges outside this cone are
+        # still useful for navigation, but they should not trigger this alert.
         valid_mask = (
             np.isfinite(ranges)
             & (ranges > msg.range_min)
@@ -346,6 +351,8 @@ class FusionNode(Node):
             if not np.any(person_mask):
                 continue
 
+            # Use a low percentile instead of the absolute minimum so one noisy
+            # LiDAR return inside a box does not dominate the person distance.
             person_ranges = ranges[person_mask]
             percentile = float(
                 np.clip(self.person_distance_percentile, 0.0, 100.0)
@@ -412,6 +419,8 @@ class FusionNode(Node):
         if abs(camera_relative) > half_fov:
             return None
 
+        # The RPLidar and camera x axes are opposite in the current mount, so
+        # the default maps positive LiDAR yaw to smaller image x values.
         if self.invert_lidar_x_axis:
             normalized_x = 0.5 - camera_relative / self.camera_horizontal_fov
         else:
@@ -448,6 +457,8 @@ class FusionNode(Node):
         return 640
 
     def _draw_overlay(self, image):
+        # Draw the same projection used for alerts so the browser stream can be
+        # used to calibrate yaw/FOV offsets against live camera frames.
         annotated = image.copy()
         height, width = annotated.shape[:2]
 

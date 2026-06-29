@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Hosts the live camera overlay, UWB state, and short evidence clips for the
+# machine-side browser view.
 import json
 import os
 import threading
@@ -685,6 +687,8 @@ class FusionWebViewerNode(Node):
         with self.lock:
             self.latest_jpeg = frame
             if now - self.last_buffer_time >= 1.0 / self.clip_fps:
+                # Keep a rolling low-rate JPEG buffer so accident reports can
+                # request frames from before and after the critical event.
                 self.frame_buffer.append((now, frame))
                 self.last_buffer_time = now
                 cutoff = now - self.clip_buffer_sec
@@ -727,6 +731,8 @@ class FusionWebViewerNode(Node):
         before = max(0.0, float(before_sec))
         after = max(0.0, float(after_sec))
         end_time = center + after
+        # If the event just happened, wait until the requested post-event window
+        # has had time to enter the rolling frame buffer.
         while time.time() < end_time:
             time.sleep(min(0.2, end_time - time.time()))
 
@@ -759,6 +765,8 @@ class FusionWebViewerNode(Node):
             'fps': max(1.0, min(12.0, float(fps))),
             'frames': manifest_frames,
         }
+        # Store frames on disk for durable browser playback and cache them in
+        # memory so immediate report views avoid extra filesystem reads.
         with open(os.path.join(clip_dir, 'manifest.json'), 'w', encoding='utf-8') as handle:
             json.dump(manifest, handle, separators=(',', ':'))
         with self.lock:

@@ -1,3 +1,6 @@
+// Optional direct LoRa telemetry for UWB worker pings and machine-state relays.
+// It shares the ESP32 SPI bus with the DW3000, so each register access forces
+// the UWB chip-select high before talking to the RFM95.
 #include "uwb_lora.h"
 
 #ifndef UWB_LORA_TELEMETRY
@@ -58,6 +61,7 @@ bool rangeValid[NUM_NODES + 1] = {};
 uint8_t readRegister(uint8_t address)
 {
     SPI.beginTransaction(SPISettings(500000, MSBFIRST, SPI_MODE0));
+    // Keep the DW3000 deselected while the RFM95 transaction is active.
     digitalWrite(UWB_CS_PIN, HIGH);
     digitalWrite(LORA_CS_PIN, LOW);
     SPI.transfer(address & 0x7F);
@@ -171,6 +175,8 @@ void publishWorkerPing()
     }
     lastPingMs = millis();
 
+    // Anchor ranges are cached from the UWB state machine; the LoRa packet is
+    // deliberately compact enough to fit inside a single SX127x payload.
     float minimumRange = 10000.0f;
     for (uint8_t anchor = 1; anchor < INITIATOR_NODE_ID; ++anchor) {
         if (rangeValid[anchor] && rangesM[anchor] < minimumRange) {

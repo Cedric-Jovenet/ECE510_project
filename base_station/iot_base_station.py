@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Lightweight HTTP dashboard and optional RFM95 LoRa receiver for the ECE510
+# machine/worker safety demo. It stores only recent status and accident reports
+# in memory so the base can run as a simple field gateway.
 import argparse
 import json
 import math
@@ -10,6 +13,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
 
+# The dashboard is embedded so the base station can run as one Python file on a
+# Raspberry Pi or in `--no-lora` cloud-mirror mode without a static asset step.
 HTML = """<!doctype html>
 <html lang="en">
 <head>
@@ -856,6 +861,8 @@ refresh();
 
 
 class StateStore:
+    """Thread-safe memory store shared by HTTP handlers and the LoRa thread."""
+
     LORA_PRIORITY_WINDOW_SEC = 15.0
     MAX_REPORT_UWB_HISTORY = 20
 
@@ -933,6 +940,8 @@ class StateStore:
                     <= self.LORA_PRIORITY_WINDOW_SEC
                 )
                 if lora_is_fresh and candidate.get('transport') != 'lora':
+                    # Preserve a fresh direct LoRa worker ping as the primary
+                    # view, while still attaching the richer HTTP relay payload.
                     enriched_payload = dict(candidate.get('payload') or {})
                     enriched_payload['primary_transport'] = 'lora'
                     enriched_payload['lora_payload'] = existing.get('payload', {})
@@ -1103,6 +1112,8 @@ class StateStore:
 
     @classmethod
     def _compact_report(cls, report):
+        # Accident reports can include video and UWB history references. Trim
+        # repeated status fields before exposing them through `/api/state`.
         compact = dict(report)
         payload = compact.get('payload')
         if isinstance(payload, dict):
@@ -1139,6 +1150,8 @@ class StateStore:
 
 
 class ApiHandler(BaseHTTPRequestHandler):
+    """Serve the browser dashboard and accept machine/worker JSON posts."""
+
     store = None
 
     def log_message(self, fmt, *args):
@@ -1188,6 +1201,8 @@ class ReusableThreadingHTTPServer(ThreadingHTTPServer):
 
 
 class Rfm95Receiver(threading.Thread):
+    """Poll the local RFM95 and translate received JSON packets into state."""
+
     REG_FIFO = 0x00
     REG_OP_MODE = 0x01
     REG_FRF_MSB = 0x06

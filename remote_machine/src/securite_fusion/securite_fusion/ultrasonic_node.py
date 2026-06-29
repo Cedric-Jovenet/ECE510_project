@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Reads GPIO ultrasonic sensors and publishes a single safety level for the
+# machine perimeter.
 import json
 import os
 import signal

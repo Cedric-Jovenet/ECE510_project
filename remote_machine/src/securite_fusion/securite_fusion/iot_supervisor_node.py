@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Aggregates ROS safety signals, drives the local buzzer, and forwards compact
+# machine status/accident reports to the base station over HTTP and LoRa relay.
 import json
 import math
 import os
@@ -363,6 +365,8 @@ class IotSupervisorNode(Node):
                 source_level = 'unknown'
             else:
                 source_level = source.get('level', 'unknown')
+            # Pick the highest severity from all fresh sources. Stale sources
+            # are kept visible in the payload but do not force an alert level.
             if LEVEL_RANK.get(source_level, 0) > LEVEL_RANK.get(level, 0):
                 level = source_level
             active_sources[name] = {
@@ -429,6 +433,8 @@ class IotSupervisorNode(Node):
         if not self.lora_gateway_udp_host or self.lora_gateway_udp_port <= 0:
             return
         self.lora_relay_sequence += 1
+        # Broadcast a tiny machine status packet so the worker-tag LoRa gateway
+        # can repeat critical machine state even if direct HTTP is unavailable.
         payload = {
             'type': 'machine_ping',
             'device_id': self.machine_id,
@@ -468,6 +474,8 @@ class IotSupervisorNode(Node):
             return
         self.last_report_time = now
         self.last_report_signature = signature
+        # Delay report generation until the post-event evidence window closes,
+        # then archive the matching camera clip and UWB samples together.
         self.pending_reports.append({
             'accident_time': now,
             'due_time': now + max(0.0, self.evidence_after),
@@ -521,6 +529,8 @@ class IotSupervisorNode(Node):
         sample['time'] = float(sample.get('time') or now)
         self.uwb_history.append(sample)
         self.last_uwb_history_time = now
+        # Keep only enough history to cover the accident-evidence window plus
+        # slack for timing jitter between ROS callbacks and report generation.
         max_age = max(30.0, self.evidence_before + self.evidence_after + 10.0)
         cutoff = now - max_age
         while self.uwb_history and float(self.uwb_history[0].get('time', 0.0)) < cutoff:

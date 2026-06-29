@@ -1,3 +1,6 @@
+// Worker-tag firmware for the ECE510 safety demo.
+// It combines IMU impact/freefall detection, optional GPS, LoRa, and HTTP so
+// accident reports can still reach the base station when one transport fails.
 #include <Arduino.h>
 #include <Wire.h>
 #include <SPI.h>
@@ -408,6 +411,8 @@ bool postHttp(const char* path, const String& payload) {
 }
 
 bool sendPacket(const char* path, const String& payload) {
+  // LoRa is preferred because it reaches the local base without WiFi. HTTP is
+  // used as a fallback when LoRa is missing or the transmit attempt times out.
   bool sentLora = sendLora(payload);
   bool sentHttp = false;
   if (!sentLora) {
@@ -451,6 +456,8 @@ void maybeDetectAccident() {
     return;
   }
   uint32_t now = millis();
+  // A single hard impact is critical immediately. A freefall only becomes a
+  // report if it is followed by a high-g landing inside the configured window.
   if (imu.g >= IMPACT_G) {
     triggerAlert("impact");
     return;
